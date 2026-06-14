@@ -1,0 +1,378 @@
+import { ComboBox, LineEdit, ScrollView, ListView } from "std-widgets.slint";
+
+// ---------------------------------------------------------------------------
+// Theme — all colours derive from a single `dark` switch.
+// ---------------------------------------------------------------------------
+export global Theme {
+    in-out property <bool> dark: true;
+
+    out property <color> bg:        dark ? #1b1c1f : #fcfbf8;
+    out property <color> panel:     dark ? #232428 : #f2f0ea;
+    out property <color> panel-alt: dark ? #2b2d32 : #e9e6dd;
+    out property <color> border:    dark ? #36383e : #ddd8cc;
+    out property <color> text:      dark ? #e8e8ea : #1f2329;
+    out property <color> muted:     dark ? #9499a1 : #6c7177;
+    out property <color> accent:    dark ? #6ea8fe : #2563eb;
+    out property <color> accent-bg: dark ? #2a3550 : #e2ecff;
+    out property <color> verse-num: dark ? #7d838d : #9aa0a6;
+
+    out property <length> reading-size: 17px;
+}
+
+// ---------------------------------------------------------------------------
+// Shared data structs (mirrored by Rust)
+// ---------------------------------------------------------------------------
+export struct TranslationItem { code: string, name: string }
+export struct BookItem { nr: int, name: string, header: bool }
+export struct VerseItem { verse: int, text: string }
+export struct SearchItem { label: string, snippet: string, book: int, chapter: int, verse: int }
+
+// ---------------------------------------------------------------------------
+// A small text button / pill.
+// ---------------------------------------------------------------------------
+component Pill inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    callback clicked;
+    height: 28px;
+    border-radius: 6px;
+    background: active ? Theme.accent-bg : (touch.has-hover ? Theme.panel-alt : transparent);
+    border-width: 1px;
+    border-color: active ? Theme.accent : Theme.border;
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        Text {
+            text: root.label;
+            color: active ? Theme.accent : Theme.text;
+            vertical-alignment: center;
+            font-size: 13px;
+        }
+    }
+    touch := TouchArea { clicked => { root.clicked(); } }
+}
+
+// ---------------------------------------------------------------------------
+// One reading column: a scrollable list of verses (hanging-indent numbers).
+// ---------------------------------------------------------------------------
+component ReadingColumn inherits ListView {
+    in property <[VerseItem]> verses;
+    in property <bool> rtl;
+    for v in verses: Rectangle {
+        background: vtouch.has-hover ? Theme.panel : transparent;
+        HorizontalLayout {
+            padding: 4px;
+            padding-left: 14px;
+            padding-right: 14px;
+            spacing: 10px;
+            Text {
+                text: v.verse;
+                width: 30px;
+                color: Theme.verse-num;
+                font-size: 12px;
+                horizontal-alignment: right;
+                vertical-alignment: top;
+                // nudge the small number to sit on the text baseline
+                y: 3px;
+            }
+            Text {
+                text: v.text;
+                color: Theme.text;
+                font-size: Theme.reading-size;
+                wrap: word-wrap;
+                horizontal-stretch: 1;
+                horizontal-alignment: root.rtl ? right : left;
+            }
+        }
+        vtouch := TouchArea { }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Main window
+// ---------------------------------------------------------------------------
+export component MainWindow inherits Window {
+    title: "Logos-rs";
+    preferred-width: 1200px;
+    preferred-height: 820px;
+    min-width: 720px;
+    min-height: 480px;
+    background: Theme.bg;
+
+    // --- data in from Rust ---
+    in property <[TranslationItem]> translations;
+    in property <[string]> translation-labels;
+    in property <[BookItem]> books;
+    in property <[int]> chapters;
+    in property <[VerseItem]> verses;
+    in property <[VerseItem]> verses2;
+    in property <[SearchItem]> results;
+    in property <string> primary-title;
+    in property <string> secondary-title;
+    in property <string> results-summary;
+    in property <bool> primary-rtl;
+    in property <bool> secondary-rtl;
+
+    in-out property <int> current-book;
+    in-out property <int> current-chapter;
+    in-out property <bool> parallel;
+    in-out property <bool> show-results;
+    in-out property <string> command;
+
+    // --- callbacks to Rust ---
+    callback select-book(int);
+    callback select-chapter(int);
+    callback go(string);
+    callback open-result(int);
+    callback primary-changed(int);
+    callback secondary-changed(int);
+    callback toggle-parallel();
+    callback toggle-theme();
+    callback prev-chapter();
+    callback next-chapter();
+    callback close-results();
+
+    VerticalLayout {
+        // ---------------- Top bar ----------------
+        Rectangle {
+            height: 52px;
+            background: Theme.panel;
+            border-width: 0px;
+            HorizontalLayout {
+                padding-left: 14px;
+                padding-right: 14px;
+                spacing: 12px;
+                Text {
+                    text: "✝ Logos";
+                    color: Theme.accent;
+                    font-size: 18px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+                // command / search box
+                Rectangle {
+                    horizontal-stretch: 1;
+                    VerticalLayout {
+                        alignment: center;
+                        cmd := LineEdit {
+                            placeholder-text: "Go to reference (John 3:16) or search…";
+                            text <=> root.command;
+                            accepted(t) => { root.go(t); }
+                        }
+                    }
+                }
+                Pill {
+                    label: root.parallel ? "Parallel ✓" : "Parallel";
+                    active: root.parallel;
+                    clicked => { root.toggle-parallel(); }
+                }
+                Pill {
+                    label: Theme.dark ? "☀ Light" : "🌙 Dark";
+                    clicked => { root.toggle-theme(); }
+                }
+            }
+        }
+        Rectangle { height: 1px; background: Theme.border; }
+
+        // ---------------- Body ----------------
+        HorizontalLayout {
+            // -------- Sidebar --------
+            Rectangle {
+                width: 270px;
+                background: Theme.panel;
+                VerticalLayout {
+                    padding: 10px;
+                    spacing: 8px;
+
+                    // translation pickers
+                    Text { text: "Primary translation"; color: Theme.muted; font-size: 11px; }
+                    ComboBox {
+                        model: root.translation-labels;
+                        current-index: 0;
+                        selected(v) => { root.primary-changed(self.current-index); }
+                    }
+                    if root.parallel: Text { text: "Secondary translation"; color: Theme.muted; font-size: 11px; }
+                    if root.parallel: ComboBox {
+                        model: root.translation-labels;
+                        current-index: 1;
+                        selected(v) => { root.secondary-changed(self.current-index); }
+                    }
+
+                    Rectangle { height: 1px; background: Theme.border; }
+
+                    // book list
+                    Text { text: "Books"; color: Theme.muted; font-size: 11px; }
+                    ListView {
+                        vertical-stretch: 1;
+                        for b[i] in root.books: Rectangle {
+                            height: b.header ? 30px : 26px;
+                            background: (!b.header && b.nr == root.current-book)
+                                ? Theme.accent-bg
+                                : (btouch.has-hover && !b.header ? Theme.panel-alt : transparent);
+                            border-radius: 5px;
+                            HorizontalLayout {
+                                padding-left: b.header ? 4px : 12px;
+                                Text {
+                                    text: b.name;
+                                    vertical-alignment: center;
+                                    font-size: b.header ? 11px : 14px;
+                                    font-weight: b.header ? 700 : 400;
+                                    color: b.header
+                                        ? Theme.muted
+                                        : (b.nr == root.current-book ? Theme.accent : Theme.text);
+                                }
+                            }
+                            btouch := TouchArea {
+                                enabled: !b.header;
+                                clicked => { root.select-book(b.nr); }
+                            }
+                        }
+                    }
+
+                    // chapter grid
+                    Text {
+                        text: "Chapters";
+                        color: Theme.muted;
+                        font-size: 11px;
+                        visible: root.chapters.length > 0;
+                    }
+                    Rectangle {
+                        height: 116px;
+                        visible: root.chapters.length > 0;
+                        chapters-scroll := ScrollView {
+                            grid := Rectangle {
+                                property <int> cols: 7;
+                                property <length> cell: 34px;
+                                width: 100%;
+                                height: Math.ceil(root.chapters.length / cols) * cell;
+                                for ch[i] in root.chapters: Rectangle {
+                                    x: Math.mod(i, grid.cols) * grid.cell;
+                                    y: Math.floor(i / grid.cols) * grid.cell;
+                                    width: grid.cell - 4px;
+                                    height: grid.cell - 4px;
+                                    border-radius: 5px;
+                                    border-width: 1px;
+                                    border-color: ch == root.current-chapter ? Theme.accent : Theme.border;
+                                    background: ch == root.current-chapter
+                                        ? Theme.accent-bg
+                                        : (chtouch.has-hover ? Theme.panel-alt : transparent);
+                                    Text {
+                                        text: ch;
+                                        font-size: 12px;
+                                        color: ch == root.current-chapter ? Theme.accent : Theme.text;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                    chtouch := TouchArea { clicked => { root.select-chapter(ch); } }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Rectangle { width: 1px; background: Theme.border; }
+
+            // -------- Reading / results area --------
+            Rectangle {
+                horizontal-stretch: 1;
+                background: Theme.bg;
+
+                // ----- Search results -----
+                if root.show-results: VerticalLayout {
+                    padding: 16px;
+                    spacing: 8px;
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Text {
+                            text: root.results-summary;
+                            color: Theme.text;
+                            font-size: 16px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        Pill { label: "✕ Close"; clicked => { root.close-results(); } }
+                    }
+                    ListView {
+                        vertical-stretch: 1;
+                        for r[i] in root.results: Rectangle {
+                            height: rlayout.preferred-height;
+                            background: rtouch.has-hover ? Theme.panel : transparent;
+                            border-radius: 6px;
+                            rlayout := VerticalLayout {
+                                padding: 8px;
+                                spacing: 2px;
+                                Text {
+                                    text: r.label;
+                                    color: Theme.accent;
+                                    font-size: 13px;
+                                    font-weight: 700;
+                                }
+                                Text {
+                                    text: r.snippet;
+                                    color: Theme.text;
+                                    font-size: 14px;
+                                    wrap: word-wrap;
+                                }
+                            }
+                            rtouch := TouchArea { clicked => { root.open-result(i); } }
+                        }
+                    }
+                }
+
+                // ----- Reading view -----
+                if !root.show-results: VerticalLayout {
+                    // chapter header with prev/next
+                    Rectangle {
+                        height: 44px;
+                        HorizontalLayout {
+                            padding-left: 16px;
+                            padding-right: 16px;
+                            spacing: 10px;
+                            Pill { label: "‹ Prev"; clicked => { root.prev-chapter(); } }
+                            Text {
+                                text: root.primary-title;
+                                color: Theme.text;
+                                font-size: 17px;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                                horizontal-alignment: center;
+                            }
+                            Pill { label: "Next ›"; clicked => { root.next-chapter(); } }
+                        }
+                    }
+                    Rectangle { height: 1px; background: Theme.border; }
+
+                    // columns
+                    HorizontalLayout {
+                        ReadingColumn {
+                            verses: root.verses;
+                            rtl: root.primary-rtl;
+                            horizontal-stretch: 1;
+                        }
+                        if root.parallel: Rectangle { width: 1px; background: Theme.border; }
+                        if root.parallel: VerticalLayout {
+                            horizontal-stretch: 1;
+                            Rectangle {
+                                height: 30px;
+                                Text {
+                                    text: root.secondary-title;
+                                    color: Theme.muted;
+                                    font-size: 13px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            ReadingColumn {
+                                verses: root.verses2;
+                                rtl: root.secondary-rtl;
+                                vertical-stretch: 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
