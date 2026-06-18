@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use logos_rs::bible::{self, Bible, Book, SearchHit, Translation};
+use logos_rs::bible::{self, Bible, Book, SearchHit, Translation, Word};
 use logos_rs::canon::Section;
 use logos_rs::reference;
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
@@ -18,6 +18,9 @@ struct State {
     book: i64,
     chapter: i64,
     last_results: Vec<SearchHit>,
+    /// Flat per-chapter word lists for the two columns, indexed by chip idx.
+    primary_words: Vec<Word>,
+    secondary_words: Vec<Word>,
 }
 
 impl State {
@@ -64,6 +67,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         book: 1,
         chapter: 1,
         last_results: Vec::new(),
+        primary_words: Vec::new(),
+        secondary_words: Vec::new(),
     }));
 
     let ui = MainWindow::new()?;
@@ -80,7 +85,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     refresh_books(&ui, &state.borrow());
-    refresh_reading(&ui, &state.borrow());
+    refresh_reading(&ui, &state);
 
     // ---- callbacks ----
     // Each callback captures a weak UI handle and a clone of the shared state.
@@ -99,7 +104,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 st.book = nr as i64;
                 st.chapter = 1;
             }
-            refresh_reading(&ui, &state.borrow());
+            refresh_reading(&ui, &state);
         });
     }
     {
@@ -107,7 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.on_select_chapter(move |ch| {
             let ui = w.unwrap();
             state.borrow_mut().chapter = ch as i64;
-            refresh_reading(&ui, &state.borrow());
+            refresh_reading(&ui, &state);
         });
     }
     {
@@ -115,7 +120,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.on_prev_chapter(move || {
             let ui = w.unwrap();
             step_chapter(&state, -1);
-            refresh_reading(&ui, &state.borrow());
+            refresh_reading(&ui, &state);
         });
     }
     {
@@ -123,7 +128,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.on_next_chapter(move || {
             let ui = w.unwrap();
             step_chapter(&state, 1);
-            refresh_reading(&ui, &state.borrow());
+            refresh_reading(&ui, &state);
         });
     }
     {
@@ -144,7 +149,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             refresh_books(&ui, &state.borrow());
-            refresh_reading(&ui, &state.borrow());
+            refresh_reading(&ui, &state);
         });
     }
     {
@@ -152,7 +157,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.on_secondary_changed(move |idx| {
             let ui = w.unwrap();
             state.borrow_mut().secondary = idx as usize;
-            refresh_reading(&ui, &state.borrow());
+            refresh_reading(&ui, &state);
         });
     }
     {
@@ -160,7 +165,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.on_toggle_parallel(move || {
             let ui = w.unwrap();
             ui.set_parallel(!ui.get_parallel());
-            refresh_reading(&ui, &state.borrow());
+            refresh_reading(&ui, &state);
         });
     }
     {
@@ -179,7 +184,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Try to interpret as a reference first; fall back to full-text search.
             if navigate_reference(&state, &text) {
                 ui.set_show_results(false);
-                refresh_reading(&ui, &state.borrow());
+                refresh_reading(&ui, &state);
             } else {
                 run_search(&ui, &state, &text);
             }
@@ -197,7 +202,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     st.chapter = hit.chapter;
                 }
                 ui.set_show_results(false);
-                refresh_reading(&ui, &state.borrow());
+                refresh_reading(&ui, &state);
             }
         });
     }
@@ -205,6 +210,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (w, _state) = ctx!();
         ui.on_close_results(move || {
             w.unwrap().set_show_results(false);
+        });
+    }
+    {
+        let (w, state) = ctx!();
+        ui.on_word_clicked(move |col, idx| {
+            let ui = w.unwrap();
+            let st = state.borrow();
+            let (words, rtl) = if col == 0 {
+                (&st.primary_words, st.translations[st.primary].rtl)
+            } else {
+                (&st.secondary_words, st.translations[st.secondary].rtl)
+            };
+            if let Some(word) = words.get(idx as usize) {
+                ui.set_word(WordInfo {
+                    surface: word.text.clone().into(),
+                    translit: word.translit.clone().into(),
+                    lemma: word.lemma.clone().into(),
+                    strongs: word.strongs.clone().into(),
+                    parsing: word.parsing.clone().into(),
+                    gloss: word.gloss.clone().into(),
+                    definition: word.definition.clone().into(),
+                    rtl,
+                });
+                ui.set_selected_col(col);
+                ui.set_selected_idx(idx);
+                ui.set_show_word(true);
+            }
+        });
+    }
+    {
+        let (w, _state) = ctx!();
+        ui.on_close_word(move || {
+            let ui = w.unwrap();
+            ui.set_show_word(false);
+            ui.set_selected_col(-1);
+            ui.set_selected_idx(-1);
         });
     }
 
@@ -233,35 +274,123 @@ fn refresh_books(ui: &MainWindow, st: &State) {
 }
 
 /// Refresh chapter grid, verse columns and titles for the current location.
-fn refresh_reading(ui: &MainWindow, st: &State) {
+fn refresh_reading(ui: &MainWindow, state: &Rc<RefCell<State>>) {
+    let mut st = state.borrow_mut();
     let pid = st.primary_id();
     let count = st.bible.chapter_count(pid, st.book).unwrap_or(0).max(1);
     let chapter = st.chapter.clamp(1, count);
+    st.chapter = chapter;
 
     let chapters: Vec<i32> = (1..=count as i32).collect();
     ui.set_chapters(ModelRc::new(VecModel::from(chapters)));
     ui.set_current_book(st.book as i32);
     ui.set_current_chapter(chapter as i32);
 
-    let verses = st.bible.chapter(pid, st.book, chapter).unwrap_or_default();
-    ui.set_verses(verse_model(&verses));
-    ui.set_primary_rtl(st.translations[st.primary].rtl);
-    ui.set_primary_title(
-        format!(
-            "{} {} · {}",
-            st.book_name(st.book),
-            chapter,
-            st.translations[st.primary].code
-        )
-        .into(),
-    );
+    let parallel = ui.get_parallel();
+    let (book, primary, secondary) = (st.book, st.primary, st.secondary);
 
-    // secondary (parallel)
+    // ----- primary column -----
+    let primary_rtl = st.translations[primary].rtl;
+    ui.set_primary_rtl(primary_rtl);
+    ui.set_primary_title(
+        format!("{} {} · {}", st.book_name(book), chapter, st.translations[primary].code).into(),
+    );
+    if st.translations[primary].tagged {
+        let budget = if parallel { 32 } else { 60 };
+        let (blocks, flat) = build_blocks(&st.bible, pid, book, chapter, primary_rtl, budget);
+        st.primary_words = flat;
+        ui.set_primary_words(blocks);
+        ui.set_primary_tagged(true);
+        ui.set_verses(ModelRc::new(VecModel::default()));
+    } else {
+        let verses = st.bible.chapter(pid, book, chapter).unwrap_or_default();
+        ui.set_verses(verse_model(&verses));
+        ui.set_primary_tagged(false);
+        st.primary_words.clear();
+    }
+
+    // ----- secondary column (parallel) -----
     let sid = st.secondary_id();
-    let verses2 = st.bible.chapter(sid, st.book, chapter).unwrap_or_default();
-    ui.set_verses2(verse_model(&verses2));
-    ui.set_secondary_rtl(st.translations[st.secondary].rtl);
-    ui.set_secondary_title(st.translations[st.secondary].name.clone().into());
+    let secondary_rtl = st.translations[secondary].rtl;
+    ui.set_secondary_rtl(secondary_rtl);
+    ui.set_secondary_title(st.translations[secondary].name.clone().into());
+    if st.translations[secondary].tagged {
+        let (blocks, flat) = build_blocks(&st.bible, sid, book, chapter, secondary_rtl, 32);
+        st.secondary_words = flat;
+        ui.set_secondary_words(blocks);
+        ui.set_secondary_tagged(true);
+        ui.set_verses2(ModelRc::new(VecModel::default()));
+    } else {
+        let verses2 = st.bible.chapter(sid, book, chapter).unwrap_or_default();
+        ui.set_verses2(verse_model(&verses2));
+        ui.set_secondary_tagged(false);
+        st.secondary_words.clear();
+    }
+
+    // clear word-selection highlight (indices change with the chapter)
+    ui.set_selected_col(-1);
+    ui.set_selected_idx(-1);
+}
+
+/// Display width of a word, ignoring Hebrew points / Greek combining accents.
+fn display_width(s: &str) -> usize {
+    s.chars()
+        .filter(|c| !('\u{0300}'..='\u{036F}').contains(c) && !('\u{0591}'..='\u{05C7}').contains(c))
+        .count()
+}
+
+/// Build wrapped verse blocks for a tagged translation, plus the flat word
+/// list (indexed by the chip `idx` used for click lookups).
+fn build_blocks(
+    bible: &Bible,
+    tid: i64,
+    book: i64,
+    chapter: i64,
+    rtl: bool,
+    budget: usize,
+) -> (ModelRc<VerseBlock>, Vec<Word>) {
+    let verses = bible.chapter(tid, book, chapter).unwrap_or_default();
+    let mut flat: Vec<Word> = Vec::new();
+    let mut blocks: Vec<VerseBlock> = Vec::new();
+
+    for v in &verses {
+        let words = bible.words(tid, book, chapter, v.verse).unwrap_or_default();
+        let base = flat.len();
+        // greedy line wrapping
+        let mut lines: Vec<WordLine> = Vec::new();
+        let mut cur: Vec<WordChip> = Vec::new();
+        let mut width = 0usize;
+        for (i, w) in words.iter().enumerate() {
+            let ww = display_width(&w.text) + 1;
+            if width + ww > budget && !cur.is_empty() {
+                lines.push(make_line(std::mem::take(&mut cur), rtl));
+                width = 0;
+            }
+            cur.push(WordChip {
+                idx: (base + i) as i32,
+                text: w.text.clone().into(),
+                tagged: !w.strongs.is_empty(),
+            });
+            width += ww;
+        }
+        if !cur.is_empty() {
+            lines.push(make_line(cur, rtl));
+        }
+        flat.extend(words);
+        blocks.push(VerseBlock {
+            verse: v.verse as i32,
+            lines: ModelRc::new(VecModel::from(lines)),
+            rtl,
+        });
+    }
+    (ModelRc::new(VecModel::from(blocks)), flat)
+}
+
+fn make_line(mut chips: Vec<WordChip>, rtl: bool) -> WordLine {
+    if rtl {
+        chips.reverse(); // right-to-left reading order within the line
+    }
+    WordLine { words: ModelRc::new(VecModel::from(chips)) }
 }
 
 fn verse_model(verses: &[bible::Verse]) -> ModelRc<VerseItem> {

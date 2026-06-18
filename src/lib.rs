@@ -4,4 +4,5 @@
 pub mod bible;
 pub mod canon;
 pub mod importer;
+pub mod morph;
 pub mod reference;

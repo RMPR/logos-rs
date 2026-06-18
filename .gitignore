@@ -2,3 +2,6 @@
 /data/*.db
 /data/*.db-*
 /data/*.json
+/data/morphhb/
+/data/morphgnt/
+/data/lexicon/

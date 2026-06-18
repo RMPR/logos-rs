@@ -11,6 +11,21 @@ pub struct Translation {
     pub name: String,
     pub lang: String,
     pub rtl: bool,
+    /// True if this translation has per-word morphology (clickable words).
+    pub tagged: bool,
+}
+
+/// One word with its morphology and lexicon data, ready for the word-study UI.
+#[derive(Clone, Debug, Default)]
+pub struct Word {
+    pub position: i64,
+    pub text: String,       // surface form
+    pub lemma: String,      // dictionary headword
+    pub translit: String,
+    pub strongs: String,    // "" if none
+    pub parsing: String,
+    pub gloss: String,
+    pub definition: String,
 }
 
 #[derive(Clone, Debug)]
@@ -67,7 +82,7 @@ impl Bible {
     pub fn translations(&self) -> rusqlite::Result<Vec<Translation>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, code, name, lang, rtl FROM translations ORDER BY sort")?;
+            .prepare("SELECT id, code, name, lang, rtl, tagged FROM translations ORDER BY sort")?;
         let rows = stmt.query_map([], |r| {
             Ok(Translation {
                 id: r.get(0)?,
@@ -75,6 +90,7 @@ impl Bible {
                 name: r.get(2)?,
                 lang: r.get(3)?,
                 rtl: r.get::<_, i64>(4)? != 0,
+                tagged: r.get::<_, i64>(5)? != 0,
             })
         })?;
         rows.collect()
@@ -124,6 +140,43 @@ impl Bible {
                 chapter: r.get(1)?,
                 verse: r.get(2)?,
                 text: r.get(3)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Per-word morphology + lexicon data for one verse (tagged translations).
+    /// Joins the Strong's lexicon so the UI has everything it needs on click.
+    pub fn words(
+        &self,
+        translation_id: i64,
+        book: i64,
+        chapter: i64,
+        verse: i64,
+    ) -> rusqlite::Result<Vec<Word>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT w.position, w.text,
+                    COALESCE(NULLIF(w.lemma,''), l.lemma, '') AS lemma,
+                    COALESCE(l.translit,'')   AS translit,
+                    COALESCE(w.strongs,'')    AS strongs,
+                    COALESCE(w.parsing,'')    AS parsing,
+                    COALESCE(l.gloss,'')      AS gloss,
+                    COALESCE(l.definition,'') AS definition
+             FROM words w
+             LEFT JOIN lexicon l ON l.strongs = w.strongs
+             WHERE w.translation_id = ?1 AND w.book = ?2 AND w.chapter = ?3 AND w.verse = ?4
+             ORDER BY w.position",
+        )?;
+        let rows = stmt.query_map([translation_id, book, chapter, verse], |r| {
+            Ok(Word {
+                position: r.get(0)?,
+                text: r.get(1)?,
+                lemma: r.get(2)?,
+                translit: r.get(3)?,
+                strongs: r.get(4)?,
+                parsing: r.get(5)?,
+                gloss: r.get(6)?,
+                definition: r.get(7)?,
             })
         })?;
         rows.collect()

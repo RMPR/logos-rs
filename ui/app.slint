@@ -27,6 +27,16 @@ export struct BookItem { nr: int, name: string, header: bool }
 export struct VerseItem { verse: int, text: string }
 export struct SearchItem { label: string, snippet: string, book: int, chapter: int, verse: int }
 
+// Word-level (tagged original-language) structures. Verses are pre-wrapped
+// into lines on the Rust side (Slint has no flow layout).
+export struct WordChip { idx: int, text: string, tagged: bool }
+export struct WordLine { words: [WordChip] }
+export struct VerseBlock { verse: int, lines: [WordLine], rtl: bool }
+export struct WordInfo {
+    surface: string, translit: string, lemma: string, strongs: string,
+    parsing: string, gloss: string, definition: string, rtl: bool,
+}
+
 // ---------------------------------------------------------------------------
 // A small text button / pill.
 // ---------------------------------------------------------------------------
@@ -89,6 +99,68 @@ component ReadingColumn inherits ListView {
 }
 
 // ---------------------------------------------------------------------------
+// A reading column of clickable, morphology-tagged words.
+// ---------------------------------------------------------------------------
+component WordColumn inherits ListView {
+    in property <[VerseBlock]> blocks;
+    in property <int> column;          // 0 = primary, 1 = secondary
+    in property <int> selected-col;
+    in property <int> selected-idx;
+    callback pick(int, int);           // (column, word index)
+
+    for vb in blocks: Rectangle {
+        HorizontalLayout {
+            padding: 5px;
+            padding-left: 14px;
+            padding-right: 14px;
+            spacing: 8px;
+            if !vb.rtl: Text {
+                text: vb.verse;
+                width: 26px;
+                color: Theme.verse-num;
+                font-size: 12px;
+                horizontal-alignment: right;
+                y: 4px;
+            }
+            VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: 2px;
+                for line in vb.lines: HorizontalLayout {
+                    spacing: 3px;
+                    alignment: vb.rtl ? end : start;
+                    for w in line.words: Rectangle {
+                        border-radius: 4px;
+                        background: (root.column == root.selected-col && w.idx == root.selected-idx)
+                            ? Theme.accent-bg
+                            : (wtouch.has-hover ? Theme.panel-alt : transparent);
+                        HorizontalLayout {
+                            padding: 1px;
+                            padding-left: 3px;
+                            padding-right: 3px;
+                            Text {
+                                text: w.text;
+                                font-size: Theme.reading-size;
+                                color: w.tagged ? Theme.text : Theme.muted;
+                            }
+                        }
+                        wtouch := TouchArea {
+                            clicked => { root.pick(root.column, w.idx); }
+                        }
+                    }
+                }
+            }
+            if vb.rtl: Text {
+                text: vb.verse;
+                width: 26px;
+                color: Theme.verse-num;
+                font-size: 12px;
+                y: 4px;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Main window
 // ---------------------------------------------------------------------------
 export component MainWindow inherits Window {
@@ -106,7 +178,17 @@ export component MainWindow inherits Window {
     in property <[int]> chapters;
     in property <[VerseItem]> verses;
     in property <[VerseItem]> verses2;
+    in property <[VerseBlock]> primary-words;
+    in property <[VerseBlock]> secondary-words;
+    in property <bool> primary-tagged;
+    in property <bool> secondary-tagged;
     in property <[SearchItem]> results;
+
+    // word study
+    in property <WordInfo> word;
+    in-out property <bool> show-word;
+    in-out property <int> selected-col: -1;
+    in-out property <int> selected-idx: -1;
     in property <string> primary-title;
     in property <string> secondary-title;
     in property <string> results-summary;
@@ -131,6 +213,8 @@ export component MainWindow inherits Window {
     callback prev-chapter();
     callback next-chapter();
     callback close-results();
+    callback word-clicked(int, int);  // (column, word index)
+    callback close-word();
 
     VerticalLayout {
         // ---------------- Top bar ----------------
@@ -346,10 +430,20 @@ export component MainWindow inherits Window {
 
                     // columns
                     HorizontalLayout {
-                        ReadingColumn {
-                            verses: root.verses;
-                            rtl: root.primary-rtl;
+                        // primary
+                        Rectangle {
                             horizontal-stretch: 1;
+                            if root.primary-tagged: WordColumn {
+                                blocks: root.primary-words;
+                                column: 0;
+                                selected-col: root.selected-col;
+                                selected-idx: root.selected-idx;
+                                pick(c, i) => { root.word-clicked(c, i); }
+                            }
+                            if !root.primary-tagged: ReadingColumn {
+                                verses: root.verses;
+                                rtl: root.primary-rtl;
+                            }
                         }
                         if root.parallel: Rectangle { width: 1px; background: Theme.border; }
                         if root.parallel: VerticalLayout {
@@ -364,11 +458,103 @@ export component MainWindow inherits Window {
                                     vertical-alignment: center;
                                 }
                             }
-                            ReadingColumn {
-                                verses: root.verses2;
-                                rtl: root.secondary-rtl;
+                            Rectangle {
                                 vertical-stretch: 1;
+                                if root.secondary-tagged: WordColumn {
+                                    blocks: root.secondary-words;
+                                    column: 1;
+                                    selected-col: root.selected-col;
+                                    selected-idx: root.selected-idx;
+                                    pick(c, i) => { root.word-clicked(c, i); }
+                                }
+                                if !root.secondary-tagged: ReadingColumn {
+                                    verses: root.verses2;
+                                    rtl: root.secondary-rtl;
+                                }
                             }
+                        }
+                    }
+                }
+            }
+
+            // -------- Word-study panel --------
+            if root.show-word: Rectangle { width: 1px; background: Theme.border; }
+            if root.show-word: Rectangle {
+                width: 340px;
+                background: Theme.panel;
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 10px;
+                    HorizontalLayout {
+                        Text {
+                            text: "Word study";
+                            color: Theme.muted;
+                            font-size: 12px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        Pill { label: "✕"; clicked => { root.close-word(); } }
+                    }
+                    Text {
+                        text: root.word.surface;
+                        color: Theme.text;
+                        font-size: 30px;
+                        horizontal-alignment: root.word.rtl ? right : left;
+                    }
+                    if root.word.translit != "": Text {
+                        text: root.word.translit;
+                        color: Theme.muted;
+                        font-size: 15px;
+                    }
+                    if root.word.strongs != "": HorizontalLayout {
+                        spacing: 8px;
+                        Rectangle {
+                            background: Theme.accent-bg;
+                            border-radius: 5px;
+                            height: 22px;
+                            horizontal-stretch: 0;
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                Text {
+                                    text: root.word.strongs;
+                                    color: Theme.accent;
+                                    font-size: 13px;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                        Text {
+                            text: root.word.lemma;
+                            color: Theme.text;
+                            font-size: 18px;
+                            vertical-alignment: center;
+                        }
+                    }
+                    if root.word.parsing != "": Text {
+                        text: root.word.parsing;
+                        color: Theme.accent;
+                        font-size: 14px;
+                        wrap: word-wrap;
+                    }
+                    if root.word.gloss != "": Text {
+                        text: root.word.gloss;
+                        color: Theme.text;
+                        font-size: 15px;
+                        font-weight: 600;
+                        wrap: word-wrap;
+                    }
+                    Rectangle { height: 1px; background: Theme.border; }
+                    ScrollView {
+                        vertical-stretch: 1;
+                        Text {
+                            width: 100%;
+                            text: root.word.definition;
+                            color: Theme.muted;
+                            font-size: 14px;
+                            wrap: word-wrap;
                         }
                     }
                 }
