@@ -18,6 +18,9 @@ pub struct Translation {
 /// One word with its morphology and lexicon data, ready for the word-study UI.
 #[derive(Clone, Debug, Default)]
 pub struct Word {
+    pub book: i64,
+    pub chapter: i64,
+    pub verse: i64,
     pub position: i64,
     pub text: String,       // surface form
     pub lemma: String,      // dictionary headword
@@ -56,6 +59,32 @@ pub struct SearchHit {
 
 pub struct Bible {
     conn: Connection,
+}
+
+/// Shared column list for word queries (kept in sync with [`map_word`]).
+const WORD_SELECT: &str = "SELECT w.book, w.chapter, w.verse, w.position, w.text,
+        COALESCE(NULLIF(w.lemma,''), l.lemma, '') AS lemma,
+        COALESCE(l.translit,'')   AS translit,
+        COALESCE(w.strongs,'')    AS strongs,
+        COALESCE(w.parsing,'')    AS parsing,
+        COALESCE(l.gloss,'')      AS gloss,
+        COALESCE(l.definition,'') AS definition
+     FROM words w LEFT JOIN lexicon l ON l.strongs = w.strongs";
+
+fn map_word(r: &rusqlite::Row) -> rusqlite::Result<Word> {
+    Ok(Word {
+        book: r.get(0)?,
+        chapter: r.get(1)?,
+        verse: r.get(2)?,
+        position: r.get(3)?,
+        text: r.get(4)?,
+        lemma: r.get(5)?,
+        translit: r.get(6)?,
+        strongs: r.get(7)?,
+        parsing: r.get(8)?,
+        gloss: r.get(9)?,
+        definition: r.get(10)?,
+    })
 }
 
 /// Locate `bible.db`: `$LOGOS_DB`, then `data/` beside the manifest, then `./data`.
@@ -154,32 +183,48 @@ impl Bible {
         chapter: i64,
         verse: i64,
     ) -> rusqlite::Result<Vec<Word>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT w.position, w.text,
-                    COALESCE(NULLIF(w.lemma,''), l.lemma, '') AS lemma,
-                    COALESCE(l.translit,'')   AS translit,
-                    COALESCE(w.strongs,'')    AS strongs,
-                    COALESCE(w.parsing,'')    AS parsing,
-                    COALESCE(l.gloss,'')      AS gloss,
-                    COALESCE(l.definition,'') AS definition
-             FROM words w
-             LEFT JOIN lexicon l ON l.strongs = w.strongs
-             WHERE w.translation_id = ?1 AND w.book = ?2 AND w.chapter = ?3 AND w.verse = ?4
-             ORDER BY w.position",
-        )?;
-        let rows = stmt.query_map([translation_id, book, chapter, verse], |r| {
-            Ok(Word {
-                position: r.get(0)?,
-                text: r.get(1)?,
-                lemma: r.get(2)?,
-                translit: r.get(3)?,
-                strongs: r.get(4)?,
-                parsing: r.get(5)?,
-                gloss: r.get(6)?,
-                definition: r.get(7)?,
-            })
-        })?;
+        let mut stmt = self
+            .conn
+            .prepare(&format!("{WORD_SELECT} WHERE w.translation_id=?1 AND w.book=?2 AND w.chapter=?3 AND w.verse=?4 ORDER BY w.position"))?;
+        let rows = stmt.query_map([translation_id, book, chapter, verse], map_word)?;
         rows.collect()
+    }
+
+    /// Original-language words carrying a given Strong's number in one verse
+    /// (used to resolve an English word back to its Hebrew/Greek word).
+    pub fn words_with_strongs(
+        &self,
+        translation_id: i64,
+        book: i64,
+        chapter: i64,
+        verse: i64,
+        strongs: &str,
+    ) -> rusqlite::Result<Vec<Word>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "{WORD_SELECT} WHERE w.translation_id=?1 AND w.book=?2 AND w.chapter=?3 AND w.verse=?4 AND w.strongs=?5 ORDER BY w.position"
+        ))?;
+        let rows = stmt.query_map(
+            rusqlite::params![translation_id, book, chapter, verse, strongs],
+            map_word,
+        )?;
+        rows.collect()
+    }
+
+    /// The plain text of a single verse (e.g. the parallel Septuagint verse).
+    pub fn verse_text(
+        &self,
+        translation_id: i64,
+        book: i64,
+        chapter: i64,
+        verse: i64,
+    ) -> rusqlite::Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT text FROM verses WHERE translation_id=?1 AND book=?2 AND chapter=?3 AND verse=?4",
+                [translation_id, book, chapter, verse],
+                |r| r.get(0),
+            )
+            .optional()
     }
 
     /// Full-text search within one translation. Returns ranked verse snippets.

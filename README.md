@@ -16,6 +16,9 @@ study experience that runs natively on Linux with a cleaner, faster UX.
   Strong's number, full morphological parsing, gloss, and definition — inspired by
   [hb.openscriptures.org](https://hb.openscriptures.org/) and
   [biblewebapp.com](https://biblewebapp.com/reader/).
+- **Reverse interlinear** — click a word in the English **ULT** and the panel shows
+  the original word it translates: the Greek for the NT, and the Hebrew **plus the
+  parallel Septuagint verse** for the OT (lemma, Strong's, parsing, definition).
 - **Right-to-left** rendering for Hebrew.
 - **Command box** — type a reference (`John 3:16`, `1 Cor 13:4-7`, `Ps 23`) to jump
   there, or any other text to run a full-text search.
@@ -30,12 +33,15 @@ The five bundled translations:
 | Code | Translation | Language | Tagged | Source / notes |
 |------|-------------|----------|:------:|----------------|
 | KJV  | King James Version | English | | getbible.net — public domain |
+| ULT  | unfoldingWord Literal Text | English | ✓ | [unfoldingWord ULT](https://git.door43.org/unfoldingWord/en_ult) — every word aligned to the original Hebrew/Greek with Strong's (CC BY-SA); powers the reverse interlinear |
 | LSG  | Louis Segond (1910) | French | | getbible.net — public domain |
 | WLC  | Westminster Leningrad Codex | Hebrew (OT) | ✓ | [OpenScriptures morphhb](https://github.com/openscriptures/morphhb) — the open Leningrad text BHS is based on, with per-word lemma + OSHM morphology |
 | SBLGNT | SBL Greek New Testament | Greek (NT) | ✓ | [MorphGNT](https://github.com/morphgnt/sblgnt) — per-word parse code + lemma |
 | LXX  | Septuagint | Greek (OT) | | getbible.net — includes deuterocanonical books |
 
-"Tagged" translations carry word-level morphology for the word-study panel.
+"Tagged" translations carry word-level data: WLC/SBLGNT have full morphology;
+ULT carries each English word's Strong's number (normalised to match WLC/SBLGNT,
+so an English click resolves to the actual original word in the verse).
 Definitions come from the OpenScriptures **Strong's lexicons** (Hebrew XML + Greek
 JSON). Greek lemmas are bridged to Strong's numbers by accent-insensitive matching
 (≈98% of NT words resolve). Hebrew lemmas are Strong's numbers directly.
@@ -67,7 +73,7 @@ src/
   reference.rs  Forgiving Scripture-reference parser ("1 Cor 13:4-7")
   morph.rs      Morphology decoders: OSHM (Hebrew) + MorphGNT (Greek) → prose
   bible.rs      Read-only data model over SQLite (verses, words, lexicon, FTS)
-  importer.rs   Builds bible.db from getbible/morphhb/MorphGNT + Strong's lexicons
+  importer.rs   Builds bible.db from getbible/morphhb/MorphGNT/ULT + Strong's lexicons
   main.rs       Slint UI wiring (state, callbacks, word wrapping)
 ui/
   app.slint     UI: theme, nav, reading columns, search, parallel, word study
@@ -78,6 +84,10 @@ Database tables: `translations`, `books`, `verses` (+ `verses_fts`),
 
 ## Known limitations / TODO
 
+- **LXX reverse lookup is verse-level**: no open, license-clean Septuagint is
+  word-aligned to the Hebrew or carries Strong's, so an OT English click shows the
+  precise Hebrew word but the LXX as the whole parallel verse (not the single Greek
+  word). Word-level LXX alignment can follow if suitable data appears.
 - **Hebrew search**: FTS5's `remove_diacritics` strips Greek accents but not Hebrew
   vowel points/cantillation, so unpointed Hebrew searches don't match yet. Planned
   fix: index a points-stripped copy of the Hebrew text (the `words` lemmas now make

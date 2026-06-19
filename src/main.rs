@@ -217,26 +217,78 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.on_word_clicked(move |col, idx| {
             let ui = w.unwrap();
             let st = state.borrow();
-            let (words, rtl) = if col == 0 {
-                (&st.primary_words, st.translations[st.primary].rtl)
-            } else {
-                (&st.secondary_words, st.translations[st.secondary].rtl)
-            };
-            if let Some(word) = words.get(idx as usize) {
-                ui.set_word(WordInfo {
-                    surface: word.text.clone().into(),
-                    translit: word.translit.clone().into(),
-                    lemma: word.lemma.clone().into(),
-                    strongs: word.strongs.clone().into(),
-                    parsing: word.parsing.clone().into(),
-                    gloss: word.gloss.clone().into(),
-                    definition: word.definition.clone().into(),
-                    rtl,
-                });
-                ui.set_selected_col(col);
-                ui.set_selected_idx(idx);
-                ui.set_show_word(true);
+            let tindex = if col == 0 { st.primary } else { st.secondary };
+            let trans = st.translations[tindex].clone();
+            let words = if col == 0 { &st.primary_words } else { &st.secondary_words };
+            let Some(word) = words.get(idx as usize).cloned() else { return };
+
+            let is_english = trans.lang == "en";
+            let is_ot = word.book < 40;
+            let orig_rtl = is_ot; // Hebrew is RTL, Greek LTR
+
+            // Reverse lookup: when clicking the English text, resolve the word
+            // to its original-language word(s) in the same verse.
+            let mut originals_label = String::new();
+            let mut originals: Vec<OriginalWord> = Vec::new();
+            let mut parsing = word.parsing.clone();
+            if is_english && !word.strongs.is_empty() {
+                let orig_code = if is_ot { "WLC" } else { "SBLGNT" };
+                if let Some(ot) = st.translations.iter().find(|t| t.code == orig_code) {
+                    let ws = st
+                        .bible
+                        .words_with_strongs(ot.id, word.book, word.chapter, word.verse, &word.strongs)
+                        .unwrap_or_default();
+                    if parsing.is_empty() {
+                        if let Some(first) = ws.first() {
+                            parsing = first.parsing.clone();
+                        }
+                    }
+                    originals = ws
+                        .iter()
+                        .map(|o| OriginalWord {
+                            text: o.text.clone().into(),
+                            parsing: o.parsing.clone().into(),
+                        })
+                        .collect();
+                    originals_label = format!(
+                        "In the {} ({orig_code})",
+                        if is_ot { "Hebrew" } else { "Greek" }
+                    );
+                }
             }
+
+            // Septuagint verse for OT words.
+            let mut lxx = String::new();
+            let mut show_lxx = false;
+            if is_ot {
+                if let Some(lt) = st.translations.iter().find(|t| t.code == "LXX") {
+                    if let Ok(Some(text)) =
+                        st.bible.verse_text(lt.id, word.book, word.chapter, word.verse)
+                    {
+                        lxx = text;
+                        show_lxx = true;
+                    }
+                }
+            }
+
+            ui.set_word(WordInfo {
+                surface: word.text.clone().into(),
+                translit: word.translit.clone().into(),
+                lemma: word.lemma.clone().into(),
+                strongs: word.strongs.clone().into(),
+                parsing: parsing.into(),
+                gloss: word.gloss.clone().into(),
+                definition: word.definition.clone().into(),
+                rtl: trans.rtl,
+                orig_rtl,
+                originals_label: originals_label.into(),
+                originals: ModelRc::new(VecModel::from(originals)),
+                lxx: lxx.into(),
+                show_lxx,
+            });
+            ui.set_selected_col(col);
+            ui.set_selected_idx(idx);
+            ui.set_show_word(true);
         });
     }
     {

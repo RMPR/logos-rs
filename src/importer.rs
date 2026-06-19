@@ -32,8 +32,20 @@ struct Source {
 
 const GETBIBLE: &[Source] = &[
     Source { slug: "kjv", code: "KJV", name: "King James Version", sort: 0 },
-    Source { slug: "ls1910", code: "LSG", name: "Louis Segond (1910)", sort: 1 },
-    Source { slug: "lxx", code: "LXX", name: "Septuagint (Greek OT)", sort: 4 },
+    Source { slug: "ls1910", code: "LSG", name: "Louis Segond (1910)", sort: 2 },
+    Source { slug: "lxx", code: "LXX", name: "Septuagint (Greek OT)", sort: 5 },
+];
+
+/// ULT USFM file stems (canonical nr = leading number, minus 1 for NT 41–67).
+const ULT_FILES: &[&str] = &[
+    "01-GEN", "02-EXO", "03-LEV", "04-NUM", "05-DEU", "06-JOS", "07-JDG", "08-RUT", "09-1SA",
+    "10-2SA", "11-1KI", "12-2KI", "13-1CH", "14-2CH", "15-EZR", "16-NEH", "17-EST", "18-JOB",
+    "19-PSA", "20-PRO", "21-ECC", "22-SNG", "23-ISA", "24-JER", "25-LAM", "26-EZK", "27-DAN",
+    "28-HOS", "29-JOL", "30-AMO", "31-OBA", "32-JON", "33-MIC", "34-NAM", "35-HAB", "36-ZEP",
+    "37-HAG", "38-ZEC", "39-MAL", "41-MAT", "42-MRK", "43-LUK", "44-JHN", "45-ACT", "46-ROM",
+    "47-1CO", "48-2CO", "49-GAL", "50-EPH", "51-PHP", "52-COL", "53-1TH", "54-2TH", "55-1TI",
+    "56-2TI", "57-TIT", "58-PHM", "59-HEB", "60-JAS", "61-1PE", "62-2PE", "63-1JN", "64-2JN",
+    "65-3JN", "66-JUD", "67-REV",
 ];
 
 /// morphhb book file stems in canonical order (Genesis=1 … Malachi=39).
@@ -354,7 +366,7 @@ fn import_oshb(tx: &Transaction, dir: &Path) -> Result<(), Box<dyn std::error::E
         "hbo",
         true,
         true,
-        2,
+        3,
     )?;
     let mut vstmt = tx.prepare(
         "INSERT INTO verses (translation_id, book, chapter, verse, text) VALUES (?1,?2,?3,?4,?5)",
@@ -418,7 +430,7 @@ fn import_sblgnt(
     dir: &Path,
     greek_map: &HashMap<String, String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let tid = insert_translation(tx, "SBLGNT", "SBL Greek New Testament", "grc", false, true, 3)?;
+    let tid = insert_translation(tx, "SBLGNT", "SBL Greek New Testament", "grc", false, true, 4)?;
     let mut vstmt = tx.prepare(
         "INSERT INTO verses (translation_id, book, chapter, verse, text) VALUES (?1,?2,?3,?4,?5)",
     )?;
@@ -487,6 +499,109 @@ fn import_sblgnt(
 }
 
 // ---------------------------------------------------------------------------
+// unfoldingWord ULT (word-aligned English reverse interlinear)
+// ---------------------------------------------------------------------------
+
+/// Normalise a USFM `x-strong` value to a lexicon key.
+/// Hebrew `b:H7225`/`H1254a` → `H7225`/`H1254` (last segment, drop homonym
+/// letter). Greek `G17220` → `G1722` (unfoldingWord encodes Greek as ×10).
+fn normalize_strong(raw: &str) -> Option<String> {
+    let seg = raw.rsplit(':').next()?.trim();
+    let mut chars = seg.chars();
+    let lang = chars.next()?;
+    if lang != 'H' && lang != 'G' {
+        return None;
+    }
+    let digits: String = chars.take_while(|c| c.is_ascii_digit()).collect();
+    let n: u32 = digits.parse().ok()?;
+    let num = if lang == 'G' { n / 10 } else { n };
+    if num == 0 {
+        return None;
+    }
+    Some(format!("{lang}{num}"))
+}
+
+fn import_ult(tx: &Transaction, dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let tid = insert_translation(tx, "ULT", "unfoldingWord Literal Text", "en", false, true, 1)?;
+    let mut vstmt = tx.prepare(
+        "INSERT INTO verses (translation_id, book, chapter, verse, text) VALUES (?1,?2,?3,?4,?5)",
+    )?;
+    let mut wstmt = tx.prepare(
+        "INSERT INTO words (translation_id, book, chapter, verse, position, text, lemma, strongs, morph, parsing) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+    )?;
+
+    // One pass over the USFM stream, dispatching on marker type.
+    let re = regex::Regex::new(
+        r#"(?x)
+        \\c\s+(?P<cnum>\d+)
+        | \\v\s+(?P<vnum>\d+)
+        | \\zaln-s\s*\|(?P<attrs>[^\\]*?)\\\*
+        | (?P<ze>\\zaln-e\\\*)
+        | \\w\s+(?P<wtext>[^|\\]*)\|[^\\]*?\\w\*
+        "#,
+    )?;
+    let re_strong = regex::Regex::new(r#"x-strong="([^"]*)""#)?;
+    let re_lemma = regex::Regex::new(r#"x-lemma="([^"]*)""#)?;
+
+    for stem in ULT_FILES {
+        let filenum: i64 = stem[..2].parse().unwrap_or(0);
+        let nr = if filenum <= 39 { filenum } else { filenum - 1 };
+        let text = std::fs::read_to_string(dir.join(format!("ult/{stem}.usfm")))?;
+
+        let mut chapter = 0i64;
+        let mut max_chapter = 0i64;
+        let mut cur: (i64, i64) = (0, 0);
+        let mut position = 0i64;
+        let mut surfaces: Vec<String> = Vec::new();
+        // Active alignment scopes (innermost last): (Strong's, original lemma).
+        let mut stack: Vec<(Option<String>, String)> = Vec::new();
+
+        for cap in re.captures_iter(&text) {
+            if let Some(c) = cap.name("cnum") {
+                chapter = c.as_str().parse().unwrap_or(chapter);
+            } else if let Some(v) = cap.name("vnum") {
+                // flush the verse we were accumulating
+                if cur.1 != 0 && !surfaces.is_empty() {
+                    vstmt.execute(rusqlite::params![tid, nr, cur.0, cur.1, surfaces.join(" ")])?;
+                }
+                surfaces.clear();
+                position = 0;
+                let vnum = v.as_str().parse().unwrap_or(0);
+                cur = (chapter, vnum);
+                max_chapter = max_chapter.max(chapter);
+            } else if let Some(a) = cap.name("attrs") {
+                let attrs = a.as_str();
+                let strong = re_strong
+                    .captures(attrs)
+                    .and_then(|c| normalize_strong(&c[1]));
+                let lemma = re_lemma.captures(attrs).map(|c| c[1].to_string()).unwrap_or_default();
+                stack.push((strong, lemma));
+            } else if cap.name("ze").is_some() {
+                stack.pop();
+            } else if let Some(w) = cap.name("wtext") {
+                let word = w.as_str().trim();
+                if word.is_empty() {
+                    continue;
+                }
+                let (strong, lemma) = stack.last().cloned().unwrap_or((None, String::new()));
+                wstmt.execute(rusqlite::params![
+                    tid, nr, cur.0, cur.1, position,
+                    word, lemma, strong, "", ""
+                ])?;
+                surfaces.push(word.to_string());
+                position += 1;
+            }
+        }
+        if cur.1 != 0 && !surfaces.is_empty() {
+            vstmt.execute(rusqlite::params![tid, nr, cur.0, cur.1, surfaces.join(" ")])?;
+        }
+        insert_book(tx, tid, nr, crate::canon::name(nr).unwrap_or(stem), max_chapter)?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let dir = data_dir();
@@ -512,6 +627,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     eprintln!("importing SBLGNT (MorphGNT, word-tagged Greek)");
     import_sblgnt(&tx, &dir, &greek_map)?;
+
+    eprintln!("importing ULT (unfoldingWord, word-aligned English)");
+    import_ult(&tx, &dir)?;
 
     tx.commit()?;
 

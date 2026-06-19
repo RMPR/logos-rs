@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 directories = "6.0.0"
+regex = "1.12.4"
 roxmltree = "0.21.1"
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
