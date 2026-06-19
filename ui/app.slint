@@ -327,35 +327,35 @@ export component MainWindow inherits Window {
                         font-size: 11px;
                         visible: root.chapters.length > 0;
                     }
-                    Rectangle {
-                        height: 116px;
+                    // Sizes to fit all chapters; caps and scrolls only when the
+                    // grid would get too tall (e.g. Psalms' 150 chapters).
+                    ScrollView {
                         visible: root.chapters.length > 0;
-                        chapters-scroll := ScrollView {
-                            grid := Rectangle {
-                                property <int> cols: 7;
-                                property <length> cell: 34px;
-                                width: 100%;
-                                height: Math.ceil(root.chapters.length / cols) * cell;
-                                for ch[i] in root.chapters: Rectangle {
-                                    x: Math.mod(i, grid.cols) * grid.cell;
-                                    y: Math.floor(i / grid.cols) * grid.cell;
-                                    width: grid.cell - 4px;
-                                    height: grid.cell - 4px;
-                                    border-radius: 5px;
-                                    border-width: 1px;
-                                    border-color: ch == root.current-chapter ? Theme.accent : Theme.border;
-                                    background: ch == root.current-chapter
-                                        ? Theme.accent-bg
-                                        : (chtouch.has-hover ? Theme.panel-alt : transparent);
-                                    Text {
-                                        text: ch;
-                                        font-size: 12px;
-                                        color: ch == root.current-chapter ? Theme.accent : Theme.text;
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
-                                    }
-                                    chtouch := TouchArea { clicked => { root.select-chapter(ch); } }
+                        height: Math.min(grid.height + 2px, 300px);
+                        grid := Rectangle {
+                            property <int> cols: 7;
+                            property <length> cell: 34px;
+                            width: cols * cell;
+                            height: Math.ceil(root.chapters.length / self.cols) * self.cell;
+                            for ch[i] in root.chapters: Rectangle {
+                                x: Math.mod(i, grid.cols) * grid.cell;
+                                y: Math.floor(i / grid.cols) * grid.cell;
+                                width: grid.cell - 4px;
+                                height: grid.cell - 4px;
+                                border-radius: 5px;
+                                border-width: 1px;
+                                border-color: ch == root.current-chapter ? Theme.accent : Theme.border;
+                                background: ch == root.current-chapter
+                                    ? Theme.accent-bg
+                                    : (chtouch.has-hover ? Theme.panel-alt : transparent);
+                                Text {
+                                    text: ch;
+                                    font-size: 12px;
+                                    color: ch == root.current-chapter ? Theme.accent : Theme.text;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
                                 }
+                                chtouch := TouchArea { clicked => { root.select-chapter(ch); } }
                             }
                         }
                     }
