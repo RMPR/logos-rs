@@ -233,12 +233,16 @@ export component MainWindow inherits Window {
                 padding-left: 14px;
                 padding-right: 14px;
                 spacing: 12px;
-                Text {
-                    text: "✝ Logos";
-                    color: Theme.accent;
-                    font-size: 18px;
-                    font-weight: 700;
-                    vertical-alignment: center;
+                // Each item is vertically centered so the logo, search box and
+                // buttons share one baseline across the 52px bar.
+                VerticalLayout {
+                    alignment: center;
+                    Text {
+                        text: "✝ Logos";
+                        color: Theme.accent;
+                        font-size: 18px;
+                        font-weight: 700;
+                    }
                 }
                 // command / search box
                 Rectangle {
@@ -252,14 +256,20 @@ export component MainWindow inherits Window {
                         }
                     }
                 }
-                Pill {
-                    label: root.parallel ? "Parallel ✓" : "Parallel";
-                    active: root.parallel;
-                    clicked => { root.toggle-parallel(); }
+                VerticalLayout {
+                    alignment: center;
+                    Pill {
+                        label: root.parallel ? "Parallel ✓" : "Parallel";
+                        active: root.parallel;
+                        clicked => { root.toggle-parallel(); }
+                    }
                 }
-                Pill {
-                    label: Theme.dark ? "☀ Light" : "🌙 Dark";
-                    clicked => { root.toggle-theme(); }
+                VerticalLayout {
+                    alignment: center;
+                    Pill {
+                        label: Theme.dark ? "☀ Light" : "🌙 Dark";
+                        clicked => { root.toggle-theme(); }
+                    }
                 }
             }
         }
@@ -329,34 +339,35 @@ export component MainWindow inherits Window {
                     }
                     // Sizes to fit all chapters; caps and scrolls only when the
                     // grid would get too tall (e.g. Psalms' 150 chapters).
-                    ScrollView {
+                    // viewport-height must be set explicitly: the cells are
+                    // absolutely positioned, so the ScrollView can't infer it.
+                    csv := ScrollView {
+                        property <int> cols: 7;
+                        property <length> cell: 34px;
+                        property <length> content-h: Math.ceil(root.chapters.length / self.cols) * self.cell;
                         visible: root.chapters.length > 0;
-                        height: Math.min(grid.height + 2px, 300px);
-                        grid := Rectangle {
-                            property <int> cols: 7;
-                            property <length> cell: 34px;
-                            width: cols * cell;
-                            height: Math.ceil(root.chapters.length / self.cols) * self.cell;
-                            for ch[i] in root.chapters: Rectangle {
-                                x: Math.mod(i, grid.cols) * grid.cell;
-                                y: Math.floor(i / grid.cols) * grid.cell;
-                                width: grid.cell - 4px;
-                                height: grid.cell - 4px;
-                                border-radius: 5px;
-                                border-width: 1px;
-                                border-color: ch == root.current-chapter ? Theme.accent : Theme.border;
-                                background: ch == root.current-chapter
-                                    ? Theme.accent-bg
-                                    : (chtouch.has-hover ? Theme.panel-alt : transparent);
-                                Text {
-                                    text: ch;
-                                    font-size: 12px;
-                                    color: ch == root.current-chapter ? Theme.accent : Theme.text;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
-                                chtouch := TouchArea { clicked => { root.select-chapter(ch); } }
+                        viewport-width: self.cols * self.cell;
+                        viewport-height: self.content-h;
+                        height: Math.min(self.content-h + 2px, 300px);
+                        for ch[i] in root.chapters: Rectangle {
+                            x: Math.mod(i, csv.cols) * csv.cell;
+                            y: Math.floor(i / csv.cols) * csv.cell;
+                            width: csv.cell - 4px;
+                            height: csv.cell - 4px;
+                            border-radius: 5px;
+                            border-width: 1px;
+                            border-color: ch == root.current-chapter ? Theme.accent : Theme.border;
+                            background: ch == root.current-chapter
+                                ? Theme.accent-bg
+                                : (chtouch.has-hover ? Theme.panel-alt : transparent);
+                            Text {
+                                text: ch;
+                                font-size: 12px;
+                                color: ch == root.current-chapter ? Theme.accent : Theme.text;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
                             }
+                            chtouch := TouchArea { clicked => { root.select-chapter(ch); } }
                         }
                     }
                 }
