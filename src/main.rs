@@ -40,13 +40,14 @@ impl State {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db = bible::default_db_path();
+    // Locate the database; build it from the vendored sources on first run.
+    let db = match std::env::var("LOGOS_DB") {
+        Ok(p) => std::path::PathBuf::from(p),
+        Err(_) => logos_rs::importer::db_path(),
+    };
     if !db.exists() {
-        eprintln!(
-            "bible.db not found at {}. Run `cargo run --bin import` first.",
-            db.display()
-        );
-        std::process::exit(1);
+        eprintln!("Building Bible database (one-time, ~10s, offline from bundled sources)…");
+        logos_rs::importer::run()?;
     }
     let bible = Bible::open(&db)?;
     let translations = bible.translations()?;

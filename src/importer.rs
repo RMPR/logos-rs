@@ -12,6 +12,7 @@
 //! Run with `cargo run --bin import`.
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, Transaction};
@@ -20,6 +21,26 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::canon::Section;
 use crate::morph;
+
+/// Read a vendored source file, transparently handling a `.gz` copy: tries
+/// `path`, then `path` + ".gz" (gunzipped). The repo ships the `.gz` versions
+/// so the database can be rebuilt offline; raw downloads are cached uncompressed.
+fn read_source(path: &Path) -> std::io::Result<String> {
+    if path.exists() {
+        return std::fs::read_to_string(path);
+    }
+    let mut gz = path.as_os_str().to_owned();
+    gz.push(".gz");
+    let file = std::fs::File::open(PathBuf::from(gz))?;
+    let mut out = String::new();
+    flate2::read::GzDecoder::new(file).read_to_string(&mut out)?;
+    Ok(out)
+}
+
+/// Path to the built database (`data/bible.db` beside the crate).
+pub fn db_path() -> PathBuf {
+    data_dir().join("bible.db")
+}
 
 // --- getbible plain-text translations -------------------------------------
 
@@ -160,8 +181,9 @@ fn data_dir() -> PathBuf {
 
 fn fetch(dir: &Path, slug: &str) -> Result<String, Box<dyn std::error::Error>> {
     let path = dir.join(format!("{slug}.json"));
-    if path.exists() {
-        return Ok(std::fs::read_to_string(&path)?);
+    // Use the vendored (.json or .json.gz) copy if present; only download if absent.
+    if let Ok(body) = read_source(&path) {
+        return Ok(body);
     }
     let url = format!("https://api.getbible.net/v2/{slug}.json");
     eprintln!("  downloading {url}");
@@ -232,7 +254,7 @@ fn import_lexicons(
     dir: &Path,
 ) -> Result<HashMap<String, String>, Box<dyn std::error::Error>> {
     // --- Hebrew (OSIS-flavoured XML) ---
-    let hb = std::fs::read_to_string(dir.join("lexicon/HebrewStrong.xml"))?;
+    let hb = read_source(&dir.join("lexicon/HebrewStrong.xml"))?;
     let doc = roxmltree::Document::parse(&hb)?;
     let mut stmt = tx.prepare(
         "INSERT OR REPLACE INTO lexicon (strongs, lemma, translit, gloss, definition, lang) \
@@ -268,7 +290,7 @@ fn import_lexicons(
     }
 
     // --- Greek (JS-wrapped JSON) ---
-    let raw = std::fs::read_to_string(dir.join("lexicon/strongs-greek-dictionary.js"))?;
+    let raw = read_source(&dir.join("lexicon/strongs-greek-dictionary.js"))?;
     let start = raw.find('{').ok_or("greek dict: no '{'")?;
     let end = raw.rfind('}').ok_or("greek dict: no '}'")?;
     let map: HashMap<String, GreekEntry> = serde_json::from_str(&raw[start..=end])?;
@@ -386,7 +408,7 @@ fn import_oshb(tx: &Transaction, dir: &Path) -> Result<(), Box<dyn std::error::E
 
     for (i, stem) in OSHB_BOOKS.iter().enumerate() {
         let nr = (i + 1) as i64;
-        let xml = std::fs::read_to_string(dir.join(format!("morphhb/{stem}.xml")))?;
+        let xml = read_source(&dir.join(format!("morphhb/{stem}.xml")))?;
         let doc = roxmltree::Document::parse(&xml)?;
         let mut max_chapter = 0i64;
 
@@ -449,7 +471,7 @@ fn import_sblgnt(
 
     for (i, stem) in SBLGNT_BOOKS.iter().enumerate() {
         let nr = 40 + i as i64;
-        let txt = std::fs::read_to_string(dir.join(format!("morphgnt/{stem}-morphgnt.txt")))?;
+        let txt = read_source(&dir.join(format!("morphgnt/{stem}-morphgnt.txt")))?;
         let mut max_chapter = 0i64;
 
         let mut cur: Option<(i64, i64)> = None;
@@ -555,7 +577,7 @@ fn import_ult(tx: &Transaction, dir: &Path) -> Result<(), Box<dyn std::error::Er
     for stem in ULT_FILES {
         let filenum: i64 = stem[..2].parse().unwrap_or(0);
         let nr = if filenum <= 39 { filenum } else { filenum - 1 };
-        let text = std::fs::read_to_string(dir.join(format!("ult/{stem}.usfm")))?;
+        let text = read_source(&dir.join(format!("ult/{stem}.usfm")))?;
 
         let mut chapter = 0i64;
         let mut max_chapter = 0i64;

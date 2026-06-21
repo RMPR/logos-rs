@@ -1,8 +1,14 @@
 /target
+
+# Generated database (built from the vendored sources on first run)
 /data/*.db
 /data/*.db-*
+
+# Raw downloaded sources are ignored; the compressed .gz copies under data/
+# are committed so the database can be rebuilt offline. (.gz is NOT ignored.)
 /data/*.json
-/data/morphhb/
-/data/morphgnt/
-/data/lexicon/
-/data/ult/
+/data/morphhb/*.xml
+/data/morphgnt/*.txt
+/data/ult/*.usfm
+/data/lexicon/*.xml
+/data/lexicon/*.js

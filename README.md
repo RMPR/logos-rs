@@ -56,16 +56,20 @@ Book numbering is aligned across translations using a canonical book id
 Requires a recent stable Rust toolchain.
 
 ```sh
-# 1. Build the local Bible database. Downloads the source texts the first time
-#    (getbible JSON + morphhb XML + MorphGNT + Strong's lexicons), caches them
-#    under data/, and produces data/bible.db (~122k verses, ~443k tagged words).
-cargo run --bin import
-
-# 2. Run the app.
 cargo run --bin logos-rs
 ```
 
-The app looks for the database via `$LOGOS_DB`, then `data/bible.db`.
+That's it. On first launch the app builds the SQLite database
+(`data/bible.db`, ~185k verses, ~1.2M tagged words) from the source texts
+**vendored in the repo** (compressed under `data/`, ~24 MB) — so it works
+**fully offline** and takes about 10 seconds, once. The database itself is
+generated, not committed.
+
+- Rebuild the database explicitly: `cargo run --bin import`.
+- Point the app at a prebuilt database: set `$LOGOS_DB=/path/to/bible.db`.
+- The importer reads each source from its committed `.gz`; if a raw (un-gzipped)
+  copy is present it uses that, and only downloads from the network if a source
+  is missing entirely.
 
 ## Architecture
 
