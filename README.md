@@ -41,6 +41,17 @@ The five bundled translations:
 | LXX  | Septuagint | Greek (OT) | | getbible.net — includes deuterocanonical books |
 | VUL  | Vulgata Clementina | Latin | | getbible.net — 66 canonical books only (deuterocanon dropped); shown as the Latin reference in the word-study panel |
 
+Optional, **user-provided** translations (copyrighted — supplied by the user from
+licensed EPUBs, **not committed** to the repo). Place the EPUBs and run
+`tools/epub2json.py` to generate `data/<slug>.json`; the importer includes them if
+present and silently skips them if not:
+
+| Code | Translation | Language | From |
+|------|-------------|----------|------|
+| ESV  | English Standard Version | English | `ESV Bible - Crossway.epub` |
+| BFC  | Bible en français courant | French | `…français courant…Collectif.epub` (deuterocanon + notes stripped) |
+| NB   | Bibelen 2011 (Bokmål) | Norwegian | `Bibelen - bokmal - Bibelselskapet.epub` |
+
 "Tagged" translations carry word-level data: WLC/SBLGNT have full morphology;
 ULT carries each English word's Strong's number (normalised to match WLC/SBLGNT,
 so an English click resolves to the actual original word in the verse).

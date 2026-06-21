@@ -51,13 +51,21 @@ struct Source {
     sort: i64,
     /// Keep only the 66-book Protestant canon (drop deuterocanon / extras).
     canonical_only: bool,
+    /// Network-downloadable (getbible). When false, the source must already be
+    /// present locally (e.g. JSON produced from a licensed EPUB by
+    /// tools/epub2json.py); it is skipped if absent and never downloaded.
+    downloadable: bool,
 }
 
 const GETBIBLE: &[Source] = &[
-    Source { slug: "kjv", code: "KJV", name: "King James Version", sort: 0, canonical_only: false },
-    Source { slug: "ls1910", code: "LSG", name: "Louis Segond (1910)", sort: 2, canonical_only: false },
-    Source { slug: "lxx", code: "LXX", name: "Septuagint (Greek OT)", sort: 5, canonical_only: false },
-    Source { slug: "vulgate", code: "VUL", name: "Vulgata Clementina", sort: 6, canonical_only: true },
+    Source { slug: "kjv", code: "KJV", name: "King James Version", sort: 0, canonical_only: false, downloadable: true },
+    Source { slug: "ls1910", code: "LSG", name: "Louis Segond (1910)", sort: 2, canonical_only: false, downloadable: true },
+    Source { slug: "lxx", code: "LXX", name: "Septuagint (Greek OT)", sort: 5, canonical_only: false, downloadable: true },
+    Source { slug: "vulgate", code: "VUL", name: "Vulgata Clementina", sort: 6, canonical_only: true, downloadable: true },
+    // Optional, user-provided (licensed) texts converted from EPUBs.
+    Source { slug: "esv", code: "ESV", name: "English Standard Version", sort: 7, canonical_only: true, downloadable: false },
+    Source { slug: "fc", code: "BFC", name: "Bible en français courant", sort: 8, canonical_only: true, downloadable: false },
+    Source { slug: "nb2011", code: "NB", name: "Bibelen 2011 (Bokmål)", sort: 9, canonical_only: true, downloadable: false },
 ];
 
 /// ULT USFM file stems (canonical nr = leading number, minus 1 for NT 41–67).
@@ -179,11 +187,14 @@ fn data_dir() -> PathBuf {
     if manifest.exists() { manifest } else { PathBuf::from("data") }
 }
 
-fn fetch(dir: &Path, slug: &str) -> Result<String, Box<dyn std::error::Error>> {
+fn fetch(dir: &Path, slug: &str, downloadable: bool) -> Result<String, Box<dyn std::error::Error>> {
     let path = dir.join(format!("{slug}.json"));
     // Use the vendored (.json or .json.gz) copy if present; only download if absent.
     if let Ok(body) = read_source(&path) {
         return Ok(body);
+    }
+    if !downloadable {
+        return Err(format!("{slug}: source not present").into());
     }
     let url = format!("https://api.getbible.net/v2/{slug}.json");
     eprintln!("  downloading {url}");
@@ -344,7 +355,7 @@ fn node_text(n: roxmltree::Node) -> String {
 // ---------------------------------------------------------------------------
 
 fn import_getbible(tx: &Transaction, dir: &Path, src: &Source) -> Result<(), Box<dyn std::error::Error>> {
-    let raw = fetch(dir, src.slug)?;
+    let raw = fetch(dir, src.slug, src.downloadable)?;
     let raw = raw.trim_start_matches('\u{feff}');
     let parsed: RawTranslation = serde_json::from_str(raw)?;
     let rtl = parsed.lang == "he" || parsed.lang == "hbo";
@@ -648,8 +659,14 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let greek_map = import_lexicons(&tx, &dir)?;
 
     for src in GETBIBLE {
-        eprintln!("importing {} ({})", src.code, src.slug);
-        import_getbible(&tx, &dir, src)?;
+        match import_getbible(&tx, &dir, src) {
+            Ok(()) => eprintln!("importing {} ({})", src.code, src.slug),
+            // Optional (non-downloadable) sources just skip when not present.
+            Err(_) if !src.downloadable => {
+                eprintln!("skipping {} — optional source not present", src.code)
+            }
+            Err(e) => return Err(e),
+        }
     }
 
     eprintln!("importing WLC (morphhb, word-tagged Hebrew)");
