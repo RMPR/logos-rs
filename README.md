@@ -16,7 +16,7 @@ study experience that runs natively on Linux with a cleaner, faster UX.
   Strong's number, full morphological parsing, gloss, and definition — inspired by
   [hb.openscriptures.org](https://hb.openscriptures.org/) and
   [biblewebapp.com](https://biblewebapp.com/reader/).
-- **Reverse interlinear** — click a word in an English translation (**KJV** or **ULT**) and the panel shows
+- **Reverse interlinear** — click a word in **KJV**, **ULT** or **Louis Segond** and the panel shows
   the original word it translates: the Greek for the NT, and the Hebrew **plus the
   parallel Septuagint verse** for the OT (lemma, Strong's, parsing, definition).
   The parallel **Vulgate (Latin)** verse is shown as a reference for both.
@@ -35,7 +35,7 @@ The five bundled translations:
 |------|-------------|----------|:------:|----------------|
 | KJV  | King James Version | English | ✓ | [bolls.life](https://bolls.life/) KJV (1769) with Strong's numbers — public domain; clickable reverse interlinear |
 | ULT  | unfoldingWord Literal Text | English | ✓ | [unfoldingWord ULT](https://git.door43.org/unfoldingWord/en_ult) — every word aligned to the original Hebrew/Greek with Strong's (CC BY-SA); powers the reverse interlinear |
-| LSG  | Louis Segond (1910) | French | | getbible.net — public domain |
+| LSG  | Louis Segond (1910) | French | ✓ | public-domain Segond + a Strong's correspondence **built by statistical word-alignment** (`tools/build_lsg_strongs.py`); clickable reverse interlinear |
 | WLC  | Westminster Leningrad Codex | Hebrew (OT) | ✓ | [OpenScriptures morphhb](https://github.com/openscriptures/morphhb) — the open Leningrad text BHS is based on, with per-word lemma + OSHM morphology |
 | SBLGNT | SBL Greek New Testament | Greek (NT) | ✓ | [MorphGNT](https://github.com/morphgnt/sblgnt) — per-word parse code + lemma |
 | LXX  | Septuagint | Greek (OT) | | getbible.net — includes deuterocanonical books |
@@ -101,6 +101,10 @@ Database tables: `translations`, `books`, `verses` (+ `verses_fts`),
 
 ## Known limitations / TODO
 
+- **Louis Segond Strong's are statistical**: no open Strong's-tagged Segond exists,
+  so the correspondence is *built* by IBM-Model-1 word alignment (LSG ↔ the Strong's
+  in each verse from WLC/SBLGNT). Content words align well; some words are left
+  untagged or occasionally mis-attached. Regenerate with `tools/build_lsg_strongs.py`.
 - **LXX reverse lookup is verse-level**: no open, license-clean Septuagint is
   word-aligned to the Hebrew or carries Strong's, so an OT English click shows the
   precise Hebrew word but the LXX as the whole parallel verse (not the single Greek

@@ -223,16 +223,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let words = if col == 0 { &st.primary_words } else { &st.secondary_words };
             let Some(word) = words.get(idx as usize).cloned() else { return };
 
-            let is_english = trans.lang == "en";
+            // A modern-language translation (KJV/ULT/LSG…) — as opposed to the
+            // original-language texts (Hebrew/Greek), whose words ARE the original.
+            let is_translation = trans.lang != "hbo" && trans.lang != "grc";
             let is_ot = word.book < 40;
             let orig_rtl = is_ot; // Hebrew is RTL, Greek LTR
 
-            // Reverse lookup: when clicking the English text, resolve the word
-            // to its original-language word(s) in the same verse.
+            // Reverse lookup: clicking a translation word resolves it to its
+            // original-language word(s) in the same verse.
             let mut originals_label = String::new();
             let mut originals: Vec<OriginalWord> = Vec::new();
             let mut parsing = word.parsing.clone();
-            if is_english && !word.strongs.is_empty() {
+            if is_translation && !word.strongs.is_empty() {
                 let orig_code = if is_ot { "WLC" } else { "SBLGNT" };
                 if let Some(ot) = st.translations.iter().find(|t| t.code == orig_code) {
                     let ws = st

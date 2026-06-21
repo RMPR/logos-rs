@@ -58,8 +58,7 @@ struct Source {
 }
 
 const GETBIBLE: &[Source] = &[
-    // KJV comes from bolls.life with Strong's numbers (see import_kjv_strongs).
-    Source { slug: "ls1910", code: "LSG", name: "Louis Segond (1910)", sort: 2, canonical_only: false, downloadable: true },
+    // KJV and LSG come from Strong's-tagged sources (see import_strongs_tagged).
     Source { slug: "lxx", code: "LXX", name: "Septuagint (Greek OT)", sort: 5, canonical_only: false, downloadable: true },
     Source { slug: "vulgate", code: "VUL", name: "Vulgata Clementina", sort: 6, canonical_only: true, downloadable: true },
     // Optional, user-provided (licensed) texts converted from EPUBs.
@@ -654,10 +653,21 @@ struct BollsVerse {
     text: String,
 }
 
-fn import_kjv_strongs(tx: &Transaction, dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let raw = read_source(&dir.join("kjv_strongs.json"))?;
+/// Import a bolls-style Strong's-tagged translation (`<S>n</S>` after words):
+/// the public-domain KJV, and the Louis Segond correspondence built by
+/// tools/build_lsg_strongs.py. Each becomes a clickable reverse interlinear.
+fn import_strongs_tagged(
+    tx: &Transaction,
+    dir: &Path,
+    slug: &str,
+    code: &str,
+    name: &str,
+    lang: &str,
+    sort: i64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let raw = read_source(&dir.join(format!("{slug}.json")))?;
     let verses: Vec<BollsVerse> = serde_json::from_str(&raw)?;
-    let tid = insert_translation(tx, "KJV", "King James Version", "en", false, true, 0)?;
+    let tid = insert_translation(tx, code, name, lang, false, true, sort)?;
 
     // <sup>…</sup> are translator footnotes (stripped); <S>n</S> are Strong's.
     let re_sup = regex::Regex::new(r"(?s)<sup>.*?</sup>")?;
@@ -730,7 +740,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let greek_map = import_lexicons(&tx, &dir)?;
 
     eprintln!("importing KJV (bolls.life, with Strong's numbers)");
-    import_kjv_strongs(&tx, &dir)?;
+    import_strongs_tagged(&tx, &dir, "kjv_strongs", "KJV", "King James Version", "en", 0)?;
+
+    eprintln!("importing LSG (Louis Segond + built Strong's correspondence)");
+    import_strongs_tagged(&tx, &dir, "lsg_strongs", "LSG", "Louis Segond (1910)", "fr", 2)?;
 
     for src in GETBIBLE {
         match import_getbible(&tx, &dir, src) {
