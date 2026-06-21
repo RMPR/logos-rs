@@ -28,12 +28,15 @@ struct Source {
     code: &'static str,
     name: &'static str,
     sort: i64,
+    /// Keep only the 66-book Protestant canon (drop deuterocanon / extras).
+    canonical_only: bool,
 }
 
 const GETBIBLE: &[Source] = &[
-    Source { slug: "kjv", code: "KJV", name: "King James Version", sort: 0 },
-    Source { slug: "ls1910", code: "LSG", name: "Louis Segond (1910)", sort: 2 },
-    Source { slug: "lxx", code: "LXX", name: "Septuagint (Greek OT)", sort: 5 },
+    Source { slug: "kjv", code: "KJV", name: "King James Version", sort: 0, canonical_only: false },
+    Source { slug: "ls1910", code: "LSG", name: "Louis Segond (1910)", sort: 2, canonical_only: false },
+    Source { slug: "lxx", code: "LXX", name: "Septuagint (Greek OT)", sort: 5, canonical_only: false },
+    Source { slug: "vulgate", code: "VUL", name: "Vulgata Clementina", sort: 6, canonical_only: true },
 ];
 
 /// ULT USFM file stems (canonical nr = leading number, minus 1 for NT 41–67).
@@ -330,6 +333,11 @@ fn import_getbible(tx: &Transaction, dir: &Path, src: &Source) -> Result<(), Box
         "INSERT INTO verses (translation_id, book, chapter, verse, text) VALUES (?1,?2,?3,?4,?5)",
     )?;
     for book in &parsed.books {
+        // For canonical-only sources (e.g. the Vulgate) drop deuterocanonical
+        // and non-canonical books (no nr, or outside the 66-book canon).
+        if src.canonical_only && !matches!(book.nr, Some(1..=66)) {
+            continue;
+        }
         let nr = book.nr.unwrap_or_else(|| { let n = extra; extra += 1; n });
         let name = crate::canon::name(nr).map(str::to_string).unwrap_or_else(|| book.name.trim().to_string());
         insert_book(tx, tid, nr, &name, book.chapters.len() as i64)?;

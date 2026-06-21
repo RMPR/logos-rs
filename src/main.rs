@@ -271,6 +271,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
+            // Vulgate (Latin) verse reference — for both OT and NT words.
+            let mut vulgate = String::new();
+            let mut show_vulgate = false;
+            if let Some(vt) = st.translations.iter().find(|t| t.code == "VUL") {
+                if let Ok(Some(text)) =
+                    st.bible.verse_text(vt.id, word.book, word.chapter, word.verse)
+                {
+                    vulgate = text;
+                    show_vulgate = true;
+                }
+            }
+
             ui.set_word(WordInfo {
                 surface: word.text.clone().into(),
                 translit: word.translit.clone().into(),
@@ -285,6 +297,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 originals: ModelRc::new(VecModel::from(originals)),
                 lxx: lxx.into(),
                 show_lxx,
+                vulgate: vulgate.into(),
+                show_vulgate,
             });
             ui.set_selected_col(col);
             ui.set_selected_idx(idx);

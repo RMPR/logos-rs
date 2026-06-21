@@ -19,6 +19,7 @@ study experience that runs natively on Linux with a cleaner, faster UX.
 - **Reverse interlinear** — click a word in the English **ULT** and the panel shows
   the original word it translates: the Greek for the NT, and the Hebrew **plus the
   parallel Septuagint verse** for the OT (lemma, Strong's, parsing, definition).
+  The parallel **Vulgate (Latin)** verse is shown as a reference for both.
 - **Right-to-left** rendering for Hebrew.
 - **Command box** — type a reference (`John 3:16`, `1 Cor 13:4-7`, `Ps 23`) to jump
   there, or any other text to run a full-text search.
@@ -38,6 +39,7 @@ The five bundled translations:
 | WLC  | Westminster Leningrad Codex | Hebrew (OT) | ✓ | [OpenScriptures morphhb](https://github.com/openscriptures/morphhb) — the open Leningrad text BHS is based on, with per-word lemma + OSHM morphology |
 | SBLGNT | SBL Greek New Testament | Greek (NT) | ✓ | [MorphGNT](https://github.com/morphgnt/sblgnt) — per-word parse code + lemma |
 | LXX  | Septuagint | Greek (OT) | | getbible.net — includes deuterocanonical books |
+| VUL  | Vulgata Clementina | Latin | | getbible.net — 66 canonical books only (deuterocanon dropped); shown as the Latin reference in the word-study panel |
 
 "Tagged" translations carry word-level data: WLC/SBLGNT have full morphology;
 ULT carries each English word's Strong's number (normalised to match WLC/SBLGNT,

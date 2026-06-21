@@ -42,6 +42,8 @@ export struct WordInfo {
     originals: [OriginalWord],
     lxx: string,
     show-lxx: bool,
+    vulgate: string,
+    show-vulgate: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -611,6 +613,19 @@ export component MainWindow inherits Window {
                                 text: root.word.lxx;
                                 color: Theme.text;
                                 font-size: 16px;
+                                wrap: word-wrap;
+                            }
+                            if root.word.show-vulgate: Text {
+                                text: "Vulgate (Latin)";
+                                color: Theme.muted;
+                                font-size: 11px;
+                                font-weight: 700;
+                            }
+                            if root.word.show-vulgate: Text {
+                                width: 100%;
+                                text: root.word.vulgate;
+                                color: Theme.text;
+                                font-size: 15px;
                                 wrap: word-wrap;
                             }
                         }
