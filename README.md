@@ -43,14 +43,18 @@ The five bundled translations:
 
 Optional, **user-provided** translations (copyrighted — supplied by the user from
 licensed EPUBs, **not committed** to the repo). Place the EPUBs and run
-`tools/epub2json.py` to generate `data/<slug>.json`; the importer includes them if
-present and silently skips them if not:
+`tools/epub2json.py` to generate `data/<slug>.json`, then optionally
+`tools/build_strongs.py` to add a Strong's correspondence (making them clickable
+reverse interlinears). The importer includes each if present and skips it if not:
 
 | Code | Translation | Language | From |
 |------|-------------|----------|------|
-| ESV  | English Standard Version | English | `ESV Bible - Crossway.epub` — also gets a built Strong's correspondence (`tools/build_strongs.py`), so it's a clickable reverse interlinear when present |
+| ESV  | English Standard Version | English | `ESV Bible - Crossway.epub` |
 | BFC  | Bible en français courant | French | `…français courant…Collectif.epub` (deuterocanon + notes stripped) |
 | NB   | Bibelen 2011 (Bokmål) | Norwegian | `Bibelen - bokmal - Bibelselskapet.epub` |
+
+All three also get a **built Strong's correspondence** (`tools/build_strongs.py`),
+so they're clickable reverse interlinears when present.
 
 "Tagged" translations carry word-level data: WLC/SBLGNT have full morphology;
 ULT carries each English word's Strong's number (normalised to match WLC/SBLGNT,
