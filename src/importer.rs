@@ -58,7 +58,7 @@ struct Source {
 }
 
 const GETBIBLE: &[Source] = &[
-    Source { slug: "kjv", code: "KJV", name: "King James Version", sort: 0, canonical_only: false, downloadable: true },
+    // KJV comes from bolls.life with Strong's numbers (see import_kjv_strongs).
     Source { slug: "ls1910", code: "LSG", name: "Louis Segond (1910)", sort: 2, canonical_only: false, downloadable: true },
     Source { slug: "lxx", code: "LXX", name: "Septuagint (Greek OT)", sort: 5, canonical_only: false, downloadable: true },
     Source { slug: "vulgate", code: "VUL", name: "Vulgata Clementina", sort: 6, canonical_only: true, downloadable: true },
@@ -643,6 +643,77 @@ fn import_ult(tx: &Transaction, dir: &Path) -> Result<(), Box<dyn std::error::Er
 }
 
 // ---------------------------------------------------------------------------
+// KJV with Strong's numbers (bolls.life) — a clickable English reverse interlinear
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct BollsVerse {
+    book: i64,
+    chapter: i64,
+    verse: i64,
+    text: String,
+}
+
+fn import_kjv_strongs(tx: &Transaction, dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let raw = read_source(&dir.join("kjv_strongs.json"))?;
+    let verses: Vec<BollsVerse> = serde_json::from_str(&raw)?;
+    let tid = insert_translation(tx, "KJV", "King James Version", "en", false, true, 0)?;
+
+    // <sup>…</sup> are translator footnotes (stripped); <S>n</S> are Strong's.
+    let re_sup = regex::Regex::new(r"(?s)<sup>.*?</sup>")?;
+    let re_strong = regex::Regex::new(r"<S>(\d+)</S>")?;
+    let re_strong_full = regex::Regex::new(r"<S>\d+</S>")?;
+
+    let mut vstmt = tx.prepare(
+        "INSERT INTO verses (translation_id, book, chapter, verse, text) VALUES (?1,?2,?3,?4,?5)",
+    )?;
+    let mut wstmt = tx.prepare(
+        "INSERT INTO words (translation_id, book, chapter, verse, position, text, lemma, strongs, morph, parsing) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+    )?;
+
+    let mut max_chapter: HashMap<i64, i64> = HashMap::new();
+    for v in &verses {
+        if !(1..=66).contains(&v.book) {
+            continue; // drop Apocrypha (bolls numbers them 67+)
+        }
+        max_chapter
+            .entry(v.book)
+            .and_modify(|m| *m = (*m).max(v.chapter))
+            .or_insert(v.chapter);
+
+        let cleaned = re_sup.replace_all(&v.text, "");
+        let mut position = 0i64;
+        let mut surfaces: Vec<String> = Vec::new();
+        for token in cleaned.split_whitespace() {
+            // first Strong's on the token → H#### (OT) / G#### (NT)
+            let strongs = re_strong.captures(token).map(|c| {
+                if v.book < 40 { format!("H{}", &c[1]) } else { format!("G{}", &c[1]) }
+            });
+            let display = re_strong_full.replace_all(token, "");
+            let display = display.trim();
+            if display.is_empty() {
+                continue; // e.g. the untranslated <S>853</S> object marker
+            }
+            wstmt.execute(rusqlite::params![
+                tid, v.book, v.chapter, v.verse, position,
+                display, "", strongs, "", ""
+            ])?;
+            surfaces.push(display.to_string());
+            position += 1;
+        }
+        vstmt.execute(rusqlite::params![tid, v.book, v.chapter, v.verse, surfaces.join(" ")])?;
+    }
+
+    for book in 1..=66 {
+        if let Some(&mc) = max_chapter.get(&book) {
+            insert_book(tx, tid, book, crate::canon::name(book).unwrap_or("?"), mc)?;
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let dir = data_dir();
@@ -657,6 +728,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     eprintln!("importing lexicons");
     let greek_map = import_lexicons(&tx, &dir)?;
+
+    eprintln!("importing KJV (bolls.life, with Strong's numbers)");
+    import_kjv_strongs(&tx, &dir)?;
 
     for src in GETBIBLE {
         match import_getbible(&tx, &dir, src) {

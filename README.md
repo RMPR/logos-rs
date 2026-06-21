@@ -16,7 +16,7 @@ study experience that runs natively on Linux with a cleaner, faster UX.
   Strong's number, full morphological parsing, gloss, and definition — inspired by
   [hb.openscriptures.org](https://hb.openscriptures.org/) and
   [biblewebapp.com](https://biblewebapp.com/reader/).
-- **Reverse interlinear** — click a word in the English **ULT** and the panel shows
+- **Reverse interlinear** — click a word in an English translation (**KJV** or **ULT**) and the panel shows
   the original word it translates: the Greek for the NT, and the Hebrew **plus the
   parallel Septuagint verse** for the OT (lemma, Strong's, parsing, definition).
   The parallel **Vulgate (Latin)** verse is shown as a reference for both.
@@ -33,7 +33,7 @@ The five bundled translations:
 
 | Code | Translation | Language | Tagged | Source / notes |
 |------|-------------|----------|:------:|----------------|
-| KJV  | King James Version | English | | getbible.net — public domain |
+| KJV  | King James Version | English | ✓ | [bolls.life](https://bolls.life/) KJV (1769) with Strong's numbers — public domain; clickable reverse interlinear |
 | ULT  | unfoldingWord Literal Text | English | ✓ | [unfoldingWord ULT](https://git.door43.org/unfoldingWord/en_ult) — every word aligned to the original Hebrew/Greek with Strong's (CC BY-SA); powers the reverse interlinear |
 | LSG  | Louis Segond (1910) | French | | getbible.net — public domain |
 | WLC  | Westminster Leningrad Codex | Hebrew (OT) | ✓ | [OpenScriptures morphhb](https://github.com/openscriptures/morphhb) — the open Leningrad text BHS is based on, with per-word lemma + OSHM morphology |
