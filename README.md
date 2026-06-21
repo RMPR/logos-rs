@@ -16,7 +16,7 @@ study experience that runs natively on Linux with a cleaner, faster UX.
   Strong's number, full morphological parsing, gloss, and definition — inspired by
   [hb.openscriptures.org](https://hb.openscriptures.org/) and
   [biblewebapp.com](https://biblewebapp.com/reader/).
-- **Reverse interlinear** — click a word in **KJV**, **ULT** or **Louis Segond** and the panel shows
+- **Reverse interlinear** — click a word in **KJV**, **ULT**, **Louis Segond** (or the **ESV**, when present) and the panel shows
   the original word it translates: the Greek for the NT, and the Hebrew **plus the
   parallel Septuagint verse** for the OT (lemma, Strong's, parsing, definition).
   The parallel **Vulgate (Latin)** verse is shown as a reference for both.
@@ -48,7 +48,7 @@ present and silently skips them if not:
 
 | Code | Translation | Language | From |
 |------|-------------|----------|------|
-| ESV  | English Standard Version | English | `ESV Bible - Crossway.epub` |
+| ESV  | English Standard Version | English | `ESV Bible - Crossway.epub` — also gets a built Strong's correspondence (`tools/build_strongs.py`), so it's a clickable reverse interlinear when present |
 | BFC  | Bible en français courant | French | `…français courant…Collectif.epub` (deuterocanon + notes stripped) |
 | NB   | Bibelen 2011 (Bokmål) | Norwegian | `Bibelen - bokmal - Bibelselskapet.epub` |
 
@@ -101,10 +101,11 @@ Database tables: `translations`, `books`, `verses` (+ `verses_fts`),
 
 ## Known limitations / TODO
 
-- **Louis Segond Strong's are statistical**: no open Strong's-tagged Segond exists,
-  so the correspondence is *built* by IBM-Model-1 word alignment (LSG ↔ the Strong's
-  in each verse from WLC/SBLGNT). Content words align well; some words are left
-  untagged or occasionally mis-attached. Regenerate with `tools/build_lsg_strongs.py`.
+- **Some Strong's correspondences are statistical**: where no Strong's-tagged
+  edition exists (Louis Segond, ESV), the correspondence is *built* by IBM-Model-1
+  word alignment (translation ↔ the Strong's in each verse from WLC/SBLGNT). Content
+  words align well; some words are left untagged or occasionally mis-attached.
+  Regenerate with `tools/build_strongs.py <db> <CODE> <out.json>`.
 - **LXX reverse lookup is verse-level**: no open, license-clean Septuagint is
   word-aligned to the Hebrew or carries Strong's, so an OT English click shows the
   precise Hebrew word but the LXX as the whole parallel verse (not the single Greek

@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
-"""Build a Strong's correspondence for the Louis Segond (1910) by statistical
-word alignment — no such open dataset exists, so we learn one.
+"""Build a Strong's correspondence for a translation by statistical word
+alignment — for translations with no existing Strong's-tagged edition.
 
-Parallel corpus (per verse): the French Segond tokens  ↔  the multiset of
+Parallel corpus (per verse): the translation's tokens  ↔  the multiset of
 Strong's numbers in that verse, taken from the already-tagged WLC (Hebrew OT)
 and SBLGNT (Greek NT) in bible.db. We train IBM Model 1 (EM) to estimate
-P(french token | Strong's), then for each verse assign every French word the
-best-fitting Strong's *present in that verse* (NULL-aware, thresholded).
+P(token | Strong's), then for each verse assign every word the best-fitting
+Strong's *present in that verse* (NULL-aware, thresholded).
 
-Inputs are all public domain / open (LSG 1910, WLC, SBLGNT), so the output is
-freely licensable. Output mimics the bolls format (text with inline <S>n</S>)
-so the Rust importer reuses its tagged-text path.
+The Strong's source (WLC, SBLGNT) is open; the output reuses the translation's
+own text, so its licensing follows that translation (the public-domain Louis
+Segond may be committed; a copyrighted ESV correspondence stays local). Output
+mimics the bolls format (text with inline <S>n</S>) so the Rust importer reuses
+its tagged-text path.
 
-Usage: build_lsg_strongs.py <bible.db> <out.json>
+Usage: build_strongs.py <bible.db> <TRANSLATION_CODE> <out.json>
 """
 import json
 import re
@@ -32,12 +34,12 @@ def norm(tok):
 
 
 def main():
-    db, out = sys.argv[1], sys.argv[2]
+    db, code, out = sys.argv[1], sys.argv[2], sys.argv[3]
     con = sqlite3.connect(db)
 
-    tid = {code: i for (i, code) in con.execute(
+    tid = {c: i for (i, c) in con.execute(
         "SELECT id, code FROM translations").fetchall()}
-    lsg, wlc, sblgnt = tid["LSG"], tid["WLC"], tid["SBLGNT"]
+    target, wlc, sblgnt = tid[code], tid["WLC"], tid["SBLGNT"]
 
     # Strong's present per verse (bare number) from the tagged originals.
     strongs_by_verse = defaultdict(set)
@@ -47,16 +49,16 @@ def main():
             "WHERE translation_id=? AND strongs IS NOT NULL AND strongs<>''", (tr,)):
             strongs_by_verse[(b, c, v)].add(re.sub(r"\D", "", s))  # drop H/G prefix
 
-    # Louis Segond verses (plain text) and their tokens.
-    lsg_verses = {}  # (b,c,v) -> original-token list
+    # Target translation verses (plain text) and their tokens.
+    tgt_verses = {}  # (b,c,v) -> original-token list
     for b, c, v, text in con.execute(
-        "SELECT book, chapter, verse, text FROM verses WHERE translation_id=?", (lsg,)):
-        lsg_verses[(b, c, v)] = text.split()
+        "SELECT book, chapter, verse, text FROM verses WHERE translation_id=?", (target,)):
+        tgt_verses[(b, c, v)] = text.split()
 
     # Parallel pairs (only verses present in both, deduped per verse).
     corpus = []
     all_strongs = set([NULL])
-    for ref, toks in lsg_verses.items():
+    for ref, toks in tgt_verses.items():
         st = strongs_by_verse.get(ref)
         if not st:
             continue
@@ -96,7 +98,7 @@ def main():
     # Decode: attach the best in-verse Strong's to each French token.
     rows = []
     assigned = total_tokens = 0
-    for ref, toks in sorted(lsg_verses.items()):
+    for ref, toks in sorted(tgt_verses.items()):
         b, c, v = ref
         st = strongs_by_verse.get(ref)
         out_toks = []

@@ -62,7 +62,7 @@ const GETBIBLE: &[Source] = &[
     Source { slug: "lxx", code: "LXX", name: "Septuagint (Greek OT)", sort: 5, canonical_only: false, downloadable: true },
     Source { slug: "vulgate", code: "VUL", name: "Vulgata Clementina", sort: 6, canonical_only: true, downloadable: true },
     // Optional, user-provided (licensed) texts converted from EPUBs.
-    Source { slug: "esv", code: "ESV", name: "English Standard Version", sort: 7, canonical_only: true, downloadable: false },
+    // ESV is imported as a tagged reverse interlinear (see run()).
     Source { slug: "fc", code: "BFC", name: "Bible en français courant", sort: 8, canonical_only: true, downloadable: false },
     Source { slug: "nb2011", code: "NB", name: "Bibelen 2011 (Bokmål)", sort: 9, canonical_only: true, downloadable: false },
 ];
@@ -744,6 +744,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     eprintln!("importing LSG (Louis Segond + built Strong's correspondence)");
     import_strongs_tagged(&tx, &dir, "lsg_strongs", "LSG", "Louis Segond (1910)", "fr", 2)?;
+
+    // ESV: optional, tagged with a built Strong's correspondence (text is
+    // copyrighted → its esv_strongs.json is local-only, skipped if absent).
+    match import_strongs_tagged(&tx, &dir, "esv_strongs", "ESV", "English Standard Version", "en", 7) {
+        Ok(()) => eprintln!("importing ESV (built Strong's correspondence)"),
+        Err(_) => eprintln!("skipping ESV — optional source not present"),
+    }
 
     for src in GETBIBLE {
         match import_getbible(&tx, &dir, src) {
