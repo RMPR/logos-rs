@@ -42,6 +42,36 @@ pub fn db_path() -> PathBuf {
     data_dir().join("bible.db")
 }
 
+/// Localized book names: language code → (book nr → name).
+type BookNames = HashMap<String, HashMap<i64, String>>;
+
+fn load_book_names(dir: &Path) -> BookNames {
+    let raw = match read_source(&dir.join("book_names.json")) {
+        Ok(r) => r,
+        Err(_) => return BookNames::new(),
+    };
+    let parsed: HashMap<String, HashMap<String, String>> =
+        serde_json::from_str(&raw).unwrap_or_default();
+    parsed
+        .into_iter()
+        .map(|(lang, m)| {
+            let inner = m.into_iter().filter_map(|(k, v)| k.parse().ok().map(|n| (n, v))).collect();
+            (lang, inner)
+        })
+        .collect()
+}
+
+/// Localized book name for a (language, nr), falling back to the canonical
+/// English name, then a generic label.
+fn book_name(names: &BookNames, lang: &str, nr: i64) -> String {
+    names
+        .get(lang)
+        .and_then(|m| m.get(&nr))
+        .cloned()
+        .or_else(|| crate::canon::name(nr).map(str::to_string))
+        .unwrap_or_else(|| format!("Book {nr}"))
+}
+
 // --- getbible plain-text translations -------------------------------------
 
 struct Source {
@@ -369,8 +399,9 @@ fn import_getbible(tx: &Transaction, dir: &Path, src: &Source) -> Result<(), Box
             continue;
         }
         let nr = book.nr.unwrap_or_else(|| { let n = extra; extra += 1; n });
-        let name = crate::canon::name(nr).map(str::to_string).unwrap_or_else(|| book.name.trim().to_string());
-        insert_book(tx, tid, nr, &name, book.chapters.len() as i64)?;
+        // getbible provides localized book names in the translation's language.
+        let name = book.name.trim();
+        insert_book(tx, tid, nr, name, book.chapters.len() as i64)?;
         for ch in &book.chapters {
             for v in &ch.verses {
                 vstmt.execute(rusqlite::params![tid, nr, v.chapter, v.verse, v.text.trim()])?;
@@ -396,7 +427,7 @@ fn hebrew_strongs(lemma: &str) -> Option<String> {
     last.map(|n| format!("H{n}"))
 }
 
-fn import_oshb(tx: &Transaction, dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn import_oshb(tx: &Transaction, dir: &Path, names: &BookNames) -> Result<(), Box<dyn std::error::Error>> {
     let tid = insert_translation(
         tx,
         "WLC",
@@ -450,7 +481,7 @@ fn import_oshb(tx: &Transaction, dir: &Path) -> Result<(), Box<dyn std::error::E
             }
             vstmt.execute(rusqlite::params![tid, nr, chapter, vnum, surfaces.join(" ")])?;
         }
-        insert_book(tx, tid, nr, crate::canon::name(nr).unwrap_or(stem), max_chapter)?;
+        insert_book(tx, tid, nr, &book_name(names, "hbo", nr), max_chapter)?;
     }
     Ok(())
 }
@@ -467,6 +498,7 @@ fn import_sblgnt(
     tx: &Transaction,
     dir: &Path,
     greek_map: &HashMap<String, String>,
+    names: &BookNames,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let tid = insert_translation(tx, "SBLGNT", "SBL Greek New Testament", "grc", false, true, 4)?;
     let mut vstmt = tx.prepare(
@@ -531,7 +563,7 @@ fn import_sblgnt(
         if let Some(loc) = cur {
             flush(loc, &mut surfaces, &mut vstmt);
         }
-        insert_book(tx, tid, nr, crate::canon::name(nr).unwrap_or(stem), max_chapter)?;
+        insert_book(tx, tid, nr, &book_name(names, "grc", nr), max_chapter)?;
     }
     Ok(())
 }
@@ -559,7 +591,7 @@ fn normalize_strong(raw: &str) -> Option<String> {
     Some(format!("{lang}{num}"))
 }
 
-fn import_ult(tx: &Transaction, dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn import_ult(tx: &Transaction, dir: &Path, names: &BookNames) -> Result<(), Box<dyn std::error::Error>> {
     let tid = insert_translation(tx, "ULT", "unfoldingWord Literal Text", "en", false, true, 1)?;
     let mut vstmt = tx.prepare(
         "INSERT INTO verses (translation_id, book, chapter, verse, text) VALUES (?1,?2,?3,?4,?5)",
@@ -634,7 +666,7 @@ fn import_ult(tx: &Transaction, dir: &Path) -> Result<(), Box<dyn std::error::Er
         if cur.1 != 0 && !surfaces.is_empty() {
             vstmt.execute(rusqlite::params![tid, nr, cur.0, cur.1, surfaces.join(" ")])?;
         }
-        insert_book(tx, tid, nr, crate::canon::name(nr).unwrap_or(stem), max_chapter)?;
+        insert_book(tx, tid, nr, &book_name(names, "en", nr), max_chapter)?;
     }
     Ok(())
 }
@@ -662,6 +694,7 @@ fn import_strongs_tagged(
     name: &str,
     lang: &str,
     sort: i64,
+    names: &BookNames,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let raw = read_source(&dir.join(format!("{slug}.json")))?;
     let verses: Vec<BollsVerse> = serde_json::from_str(&raw)?;
@@ -715,7 +748,7 @@ fn import_strongs_tagged(
 
     for book in 1..=66 {
         if let Some(&mc) = max_chapter.get(&book) {
-            insert_book(tx, tid, book, crate::canon::name(book).unwrap_or("?"), mc)?;
+            insert_book(tx, tid, book, &book_name(names, lang, book), mc)?;
         }
     }
     Ok(())
@@ -734,14 +767,16 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let tx = conn.transaction()?;
 
+    let names = load_book_names(&dir);
+
     eprintln!("importing lexicons");
     let greek_map = import_lexicons(&tx, &dir)?;
 
     eprintln!("importing KJV (bolls.life, with Strong's numbers)");
-    import_strongs_tagged(&tx, &dir, "kjv_strongs", "KJV", "King James Version", "en", 0)?;
+    import_strongs_tagged(&tx, &dir, "kjv_strongs", "KJV", "King James Version", "en", 0, &names)?;
 
     eprintln!("importing LSG (Louis Segond + built Strong's correspondence)");
-    import_strongs_tagged(&tx, &dir, "lsg_strongs", "LSG", "Louis Segond (1910)", "fr", 2)?;
+    import_strongs_tagged(&tx, &dir, "lsg_strongs", "LSG", "Louis Segond (1910)", "fr", 2, &names)?;
 
     // EPUB-derived texts, tagged with a built Strong's correspondence. Their
     // text is copyrighted → the *_strongs.json are local-only, skipped if absent.
@@ -750,7 +785,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         ("fc_strongs", "BFC", "Bible en français courant", "fr", 8),
         ("nb_strongs", "NB", "Bibelen 2011 (Bokmål)", "nb", 9),
     ] {
-        match import_strongs_tagged(&tx, &dir, slug, code, name, lang, sort) {
+        match import_strongs_tagged(&tx, &dir, slug, code, name, lang, sort, &names) {
             Ok(()) => eprintln!("importing {code} (built Strong's correspondence)"),
             Err(_) => eprintln!("skipping {code} — optional source not present"),
         }
@@ -768,13 +803,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     eprintln!("importing WLC (morphhb, word-tagged Hebrew)");
-    import_oshb(&tx, &dir)?;
+    import_oshb(&tx, &dir, &names)?;
 
     eprintln!("importing SBLGNT (MorphGNT, word-tagged Greek)");
-    import_sblgnt(&tx, &dir, &greek_map)?;
+    import_sblgnt(&tx, &dir, &greek_map, &names)?;
 
     eprintln!("importing ULT (unfoldingWord, word-aligned English)");
-    import_ult(&tx, &dir)?;
+    import_ult(&tx, &dir, &names)?;
 
     tx.commit()?;
 
