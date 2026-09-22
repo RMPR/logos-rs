@@ -87,6 +87,17 @@ struct Source {
     downloadable: bool,
 }
 
+/// A Strong's-tagged translation imported by `import_strongs_tagged`: either a
+/// natively tagged edition (KJV) or one carrying a correspondence built by
+/// tools/build_strongs.py.
+struct TaggedSource {
+    slug: &'static str,
+    code: &'static str,
+    name: &'static str,
+    lang: &'static str,
+    sort: i64,
+}
+
 const GETBIBLE: &[Source] = &[
     // KJV and LSG come from Strong's-tagged sources (see import_strongs_tagged).
     Source { slug: "lxx", code: "LXX", name: "Septuagint (Greek OT)", sort: 5, canonical_only: false, downloadable: true },
@@ -689,16 +700,12 @@ struct BollsVerse {
 fn import_strongs_tagged(
     tx: &Transaction,
     dir: &Path,
-    slug: &str,
-    code: &str,
-    name: &str,
-    lang: &str,
-    sort: i64,
+    src: &TaggedSource,
     names: &BookNames,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let raw = read_source(&dir.join(format!("{slug}.json")))?;
+    let raw = read_source(&dir.join(format!("{}.json", src.slug)))?;
     let verses: Vec<BollsVerse> = serde_json::from_str(&raw)?;
-    let tid = insert_translation(tx, code, name, lang, false, true, sort)?;
+    let tid = insert_translation(tx, src.code, src.name, src.lang, false, true, src.sort)?;
 
     // <sup>…</sup> are translator footnotes (stripped); <S>n</S> are Strong's.
     let re_sup = regex::Regex::new(r"(?s)<sup>.*?</sup>")?;
@@ -748,7 +755,7 @@ fn import_strongs_tagged(
 
     for book in 1..=66 {
         if let Some(&mc) = max_chapter.get(&book) {
-            insert_book(tx, tid, book, &book_name(names, lang, book), mc)?;
+            insert_book(tx, tid, book, &book_name(names, src.lang, book), mc)?;
         }
     }
     Ok(())
@@ -773,21 +780,33 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let greek_map = import_lexicons(&tx, &dir)?;
 
     eprintln!("importing KJV (bolls.life, with Strong's numbers)");
-    import_strongs_tagged(&tx, &dir, "kjv_strongs", "KJV", "King James Version", "en", 0, &names)?;
+    let kjv = TaggedSource {
+        slug: "kjv_strongs", code: "KJV", name: "King James Version", lang: "en", sort: 0,
+    };
+    import_strongs_tagged(&tx, &dir, &kjv, &names)?;
 
     eprintln!("importing LSG (Louis Segond + built Strong's correspondence)");
-    import_strongs_tagged(&tx, &dir, "lsg_strongs", "LSG", "Louis Segond (1910)", "fr", 2, &names)?;
+    let lsg = TaggedSource {
+        slug: "lsg_strongs", code: "LSG", name: "Louis Segond (1910)", lang: "fr", sort: 2,
+    };
+    import_strongs_tagged(&tx, &dir, &lsg, &names)?;
 
     // EPUB-derived texts, tagged with a built Strong's correspondence. Their
     // text is copyrighted → the *_strongs.json are local-only, skipped if absent.
-    for (slug, code, name, lang, sort) in [
-        ("esv_strongs", "ESV", "English Standard Version", "en", 7),
-        ("fc_strongs", "BFC", "Bible en français courant", "fr", 8),
-        ("nb_strongs", "NB", "Bibelen 2011 (Bokmål)", "nb", 9),
+    for src in [
+        TaggedSource {
+            slug: "esv_strongs", code: "ESV", name: "English Standard Version", lang: "en", sort: 7,
+        },
+        TaggedSource {
+            slug: "fc_strongs", code: "BFC", name: "Bible en français courant", lang: "fr", sort: 8,
+        },
+        TaggedSource {
+            slug: "nb_strongs", code: "NB", name: "Bibelen 2011 (Bokmål)", lang: "nb", sort: 9,
+        },
     ] {
-        match import_strongs_tagged(&tx, &dir, slug, code, name, lang, sort, &names) {
-            Ok(()) => eprintln!("importing {code} (built Strong's correspondence)"),
-            Err(_) => eprintln!("skipping {code} — optional source not present"),
+        match import_strongs_tagged(&tx, &dir, &src, &names) {
+            Ok(()) => eprintln!("importing {} (built Strong's correspondence)", src.code),
+            Err(_) => eprintln!("skipping {} — optional source not present", src.code),
         }
     }
 

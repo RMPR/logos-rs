@@ -24,14 +24,24 @@ export global Theme {
 // ---------------------------------------------------------------------------
 export struct TranslationItem { code: string, name: string }
 export struct BookItem { nr: int, name: string, header: bool }
-export struct VerseItem { verse: int, text: string }
 export struct SearchItem { label: string, snippet: string, book: int, chapter: int, verse: int }
 
 // Word-level (tagged original-language) structures. Verses are pre-wrapped
 // into lines on the Rust side (Slint has no flow layout).
 export struct WordChip { idx: int, text: string, tagged: bool }
 export struct WordLine { words: [WordChip] }
-export struct VerseBlock { verse: int, lines: [WordLine], rtl: bool }
+
+// One row of a reading column. A row is either plain prose (`text`) or a
+// sequence of clickable, morphology-tagged words (`lines`) — never both.
+// Both kinds share one model so that a column is a single ListView, which is
+// what lets the two columns lock their scroll positions to each other.
+export struct VerseRow {
+    verse: int,
+    text: string,
+    lines: [WordLine],
+    tagged: bool,
+    rtl: bool,
+}
 export struct OriginalWord { text: string, parsing: string }
 export struct WordInfo {
     surface: string, translit: string, lemma: string, strongs: string,
@@ -72,71 +82,55 @@ component Pill inherits Rectangle {
 }
 
 // ---------------------------------------------------------------------------
-// One reading column: a scrollable list of verses (hanging-indent numbers).
+// One reading column: a scrollable list of verses. Rows are either plain
+// prose or clickable, morphology-tagged words, depending on the row itself —
+// keeping it one ListView is what makes the column addressable for scroll
+// locking (elements inside a Slint `if` cannot be reached by name).
 // ---------------------------------------------------------------------------
 component ReadingColumn inherits ListView {
-    in property <[VerseItem]> verses;
-    in property <bool> rtl;
-    for v in verses: Rectangle {
-        background: vtouch.has-hover ? Theme.panel : transparent;
-        HorizontalLayout {
-            padding: 4px;
-            padding-left: 14px;
-            padding-right: 14px;
-            spacing: 10px;
-            Text {
-                text: v.verse;
-                width: 30px;
-                color: Theme.verse-num;
-                font-size: 12px;
-                horizontal-alignment: right;
-                vertical-alignment: top;
-                // nudge the small number to sit on the text baseline
-                y: 3px;
-            }
-            Text {
-                text: v.text;
-                color: Theme.text;
-                font-size: Theme.reading-size;
-                wrap: word-wrap;
-                horizontal-stretch: 1;
-                horizontal-alignment: root.rtl ? right : left;
-            }
-        }
-        vtouch := TouchArea { }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// A reading column of clickable, morphology-tagged words.
-// ---------------------------------------------------------------------------
-component WordColumn inherits ListView {
-    in property <[VerseBlock]> blocks;
+    in property <[VerseRow]> rows;
     in property <int> column;          // 0 = primary, 1 = secondary
     in property <int> selected-col;
     in property <int> selected-idx;
     callback pick(int, int);           // (column, word index)
 
-    for vb in blocks: Rectangle {
+    for r in rows: Rectangle {
+        // declared first so the word chips above it keep their own clicks
+        vtouch := TouchArea { }
+        background: (!r.tagged && vtouch.has-hover) ? Theme.panel : transparent;
         HorizontalLayout {
-            padding: 5px;
+            padding: r.tagged ? 5px : 4px;
             padding-left: 14px;
             padding-right: 14px;
-            spacing: 8px;
-            if !vb.rtl: Text {
-                text: vb.verse;
-                width: 26px;
+            spacing: r.tagged ? 8px : 10px;
+
+            // verse number — leading, except for right-to-left word rows
+            if !r.tagged || !r.rtl: Text {
+                text: r.verse;
+                width: r.tagged ? 26px : 30px;
                 color: Theme.verse-num;
                 font-size: 12px;
                 horizontal-alignment: right;
-                y: 4px;
+                vertical-alignment: top;
+                // nudge the small number to sit on the text baseline
+                y: r.tagged ? 4px : 3px;
             }
-            VerticalLayout {
+
+            if !r.tagged: Text {
+                text: r.text;
+                color: Theme.text;
+                font-size: Theme.reading-size;
+                wrap: word-wrap;
+                horizontal-stretch: 1;
+                horizontal-alignment: r.rtl ? right : left;
+            }
+
+            if r.tagged: VerticalLayout {
                 horizontal-stretch: 1;
                 spacing: 2px;
-                for line in vb.lines: HorizontalLayout {
+                for line in r.lines: HorizontalLayout {
                     spacing: 3px;
-                    alignment: vb.rtl ? end : start;
+                    alignment: r.rtl ? end : start;
                     for w in line.words: Rectangle {
                         border-radius: 4px;
                         background: (root.column == root.selected-col && w.idx == root.selected-idx)
@@ -158,12 +152,155 @@ component WordColumn inherits ListView {
                     }
                 }
             }
-            if vb.rtl: Text {
-                text: vb.verse;
+
+            if r.tagged && r.rtl: Text {
+                text: r.verse;
                 width: 26px;
                 color: Theme.verse-num;
                 font-size: 12px;
                 y: 4px;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The reading area: one column, or two side by side with their scrolling
+// locked together.
+//
+// Both columns are always instantiated and placed by hand instead of being
+// wrapped in `if parallel`, and they are direct children of this component so
+// that each can reach the other by id — Slint scopes ids to the element that
+// encloses them, and hides the ones declared inside a conditional entirely.
+// ---------------------------------------------------------------------------
+component ParallelColumns inherits Rectangle {
+    in property <[VerseRow]> rows;
+    in property <[VerseRow]> rows2;
+    in property <bool> parallel;
+    in property <bool> scroll-lock;
+    in property <string> subtitle;
+    in property <string> subtitle2;
+    in property <int> selected-col;
+    in property <int> selected-idx;
+    /// Bumped by Rust on every navigation; sends both columns back to the top.
+    in property <int> nav-epoch;
+    callback pick(int, int);           // (column, word index)
+
+    property <length> head-h: root.parallel ? 30px : 0px;
+    property <length> w1: root.parallel ? (self.width - 1px) / 2 : self.width;
+    property <length> w2: max(0px, self.width - self.w1 - 1px);
+
+    // --- scroll locking ----------------------------------------------------
+    // Both columns hold the same chapter, so mapping "rows scrolled past"
+    // from one to the other keeps the same verse at the top even when the two
+    // texts differ wildly in height (tagged word chips wrap much taller than
+    // prose). A ListView reports viewport-height as rows × the average height
+    // of the rows it has measured, which is exactly the scale we need.
+    //
+    // The sync hangs off `scrolled`, which a ScrollView only emits for real
+    // input — wheel, drag, scrollbar. Watching viewport-y instead would also
+    // catch the ListView re-anchoring itself as it refines its height
+    // estimate, and those corrections would bounce between the columns.
+    property <length> row-h1: root.rows.length > 0 ? col1.viewport-height / root.rows.length : 0px;
+    property <length> row-h2: root.rows2.length > 0 ? col2.viewport-height / root.rows2.length : 0px;
+    // most negative viewport-y each column can take (0px = top)
+    property <length> floor1: min(0px, col1.visible-height - col1.viewport-height);
+    property <length> floor2: min(0px, col2.visible-height - col2.viewport-height);
+    property <bool> lock-active: root.parallel && root.scroll-lock
+        && root.row-h1 > 0px && root.row-h2 > 0px;
+
+    function push-secondary() {
+        col2.viewport-y = max(root.floor2, min(0px, col1.viewport-y * (root.row-h2 / root.row-h1)));
+    }
+
+    function push-primary() {
+        col1.viewport-y = max(root.floor1, min(0px, col2.viewport-y * (root.row-h1 / root.row-h2)));
+    }
+
+    // Re-align when the lock is switched back on, rather than leaving the
+    // columns apart until the next scroll.
+    property <bool> lock-watch: root.scroll-lock;
+    changed lock-watch => {
+        if (root.lock-watch && root.lock-active) {
+            root.push-secondary();
+        }
+    }
+
+    property <int> epoch-watch: root.nav-epoch;
+    changed epoch-watch => {
+        col1.viewport-y = 0px;
+        col2.viewport-y = 0px;
+    }
+
+    // --- layout ------------------------------------------------------------
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: root.w1;
+        height: root.head-h;
+        visible: root.parallel;
+        Text {
+            text: root.subtitle;
+            color: Theme.muted;
+            font-size: 13px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+    col1 := ReadingColumn {
+        x: 0;
+        y: root.head-h;
+        width: root.w1;
+        height: root.height - root.head-h;
+        rows: root.rows;
+        column: 0;
+        selected-col: root.selected-col;
+        selected-idx: root.selected-idx;
+        pick(c, i) => { root.pick(c, i); }
+        scrolled => {
+            if (root.lock-active) {
+                root.push-secondary();
+            }
+        }
+    }
+
+    Rectangle {
+        x: root.w1;
+        y: 0;
+        width: 1px;
+        height: root.height;
+        background: Theme.border;
+        visible: root.parallel;
+    }
+
+    Rectangle {
+        x: root.w1 + 1px;
+        y: 0;
+        width: root.w2;
+        height: root.head-h;
+        visible: root.parallel;
+        Text {
+            text: root.subtitle2;
+            color: Theme.muted;
+            font-size: 13px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+    col2 := ReadingColumn {
+        x: root.w1 + 1px;
+        y: root.head-h;
+        width: root.w2;
+        height: root.height - root.head-h;
+        visible: root.parallel;
+        rows: root.rows2;
+        column: 1;
+        selected-col: root.selected-col;
+        selected-idx: root.selected-idx;
+        pick(c, i) => { root.pick(c, i); }
+        scrolled => {
+            if (root.lock-active) {
+                root.push-primary();
             }
         }
     }
@@ -185,12 +322,8 @@ export component MainWindow inherits Window {
     in property <[string]> translation-labels;
     in property <[BookItem]> books;
     in property <[int]> chapters;
-    in property <[VerseItem]> verses;
-    in property <[VerseItem]> verses2;
-    in property <[VerseBlock]> primary-words;
-    in property <[VerseBlock]> secondary-words;
-    in property <bool> primary-tagged;
-    in property <bool> secondary-tagged;
+    in property <[VerseRow]> rows;      // primary column
+    in property <[VerseRow]> rows2;     // secondary column (parallel only)
     in property <[SearchItem]> results;
 
     // word study
@@ -199,16 +332,23 @@ export component MainWindow inherits Window {
     in-out property <int> selected-col: -1;
     in-out property <int> selected-idx: -1;
     in property <string> primary-title;
+    in property <string> primary-subtitle;
     in property <string> secondary-title;
     in property <string> results-summary;
-    in property <bool> primary-rtl;
-    in property <bool> secondary-rtl;
 
     in-out property <int> current-book;
     in-out property <int> current-chapter;
     in-out property <bool> parallel;
     in-out property <bool> show-results;
     in-out property <string> command;
+
+    // --- parallel scroll locking ---
+    // On by default: scrolling either column moves the other to the same
+    // verse. Rust resets both columns to the top on navigation.
+    in-out property <bool> scroll-lock: true;
+    /// Bumped by Rust whenever the passage changes, to send both columns back
+    /// to the top of the new chapter.
+    in property <int> nav-epoch;
 
     // --- callbacks to Rust ---
     callback select-book(int);
@@ -264,6 +404,14 @@ export component MainWindow inherits Window {
                         label: root.parallel ? "Parallel ✓" : "Parallel";
                         active: root.parallel;
                         clicked => { root.toggle-parallel(); }
+                    }
+                }
+                if root.parallel: VerticalLayout {
+                    alignment: center;
+                    Pill {
+                        label: root.scroll-lock ? "🔗 Linked" : "⛓ Unlinked";
+                        active: root.scroll-lock;
+                        clicked => { root.scroll-lock = !root.scroll-lock; }
                     }
                 }
                 VerticalLayout {
@@ -448,51 +596,18 @@ export component MainWindow inherits Window {
                     }
                     Rectangle { height: 1px; background: Theme.border; }
 
-                    // columns
-                    HorizontalLayout {
-                        // primary
-                        Rectangle {
-                            horizontal-stretch: 1;
-                            if root.primary-tagged: WordColumn {
-                                blocks: root.primary-words;
-                                column: 0;
-                                selected-col: root.selected-col;
-                                selected-idx: root.selected-idx;
-                                pick(c, i) => { root.word-clicked(c, i); }
-                            }
-                            if !root.primary-tagged: ReadingColumn {
-                                verses: root.verses;
-                                rtl: root.primary-rtl;
-                            }
-                        }
-                        if root.parallel: Rectangle { width: 1px; background: Theme.border; }
-                        if root.parallel: VerticalLayout {
-                            horizontal-stretch: 1;
-                            Rectangle {
-                                height: 30px;
-                                Text {
-                                    text: root.secondary-title;
-                                    color: Theme.muted;
-                                    font-size: 13px;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
-                            }
-                            Rectangle {
-                                vertical-stretch: 1;
-                                if root.secondary-tagged: WordColumn {
-                                    blocks: root.secondary-words;
-                                    column: 1;
-                                    selected-col: root.selected-col;
-                                    selected-idx: root.selected-idx;
-                                    pick(c, i) => { root.word-clicked(c, i); }
-                                }
-                                if !root.secondary-tagged: ReadingColumn {
-                                    verses: root.verses2;
-                                    rtl: root.secondary-rtl;
-                                }
-                            }
-                        }
+                    ParallelColumns {
+                        vertical-stretch: 1;
+                        rows: root.rows;
+                        rows2: root.rows2;
+                        parallel: root.parallel;
+                        scroll-lock: root.scroll-lock;
+                        subtitle: root.primary-subtitle;
+                        subtitle2: root.secondary-title;
+                        selected-col: root.selected-col;
+                        selected-idx: root.selected-idx;
+                        nav-epoch: root.nav-epoch;
+                        pick(c, i) => { root.word-clicked(c, i); }
                     }
                 }
             }

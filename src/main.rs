@@ -142,11 +142,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let id = st.primary_id();
                 st.primary_books = st.bible.books(id).unwrap_or_default();
                 // If the current book is missing in this translation, jump to its first.
-                if !st.primary_books.iter().any(|b| b.nr == st.book) {
-                    if let Some(first) = st.primary_books.first() {
-                        st.book = first.nr;
-                        st.chapter = 1;
-                    }
+                if !st.primary_books.iter().any(|b| b.nr == st.book)
+                    && let Some(first) = st.primary_books.first()
+                {
+                    st.book = first.nr;
+                    st.chapter = 1;
                 }
             }
             refresh_books(&ui, &state.borrow());
@@ -241,10 +241,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .bible
                         .words_with_strongs(ot.id, word.book, word.chapter, word.verse, &word.strongs)
                         .unwrap_or_default();
-                    if parsing.is_empty() {
-                        if let Some(first) = ws.first() {
-                            parsing = first.parsing.clone();
-                        }
+                    if parsing.is_empty() && let Some(first) = ws.first() {
+                        parsing = first.parsing.clone();
                     }
                     originals = ws
                         .iter()
@@ -263,27 +261,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Septuagint verse for OT words.
             let mut lxx = String::new();
             let mut show_lxx = false;
-            if is_ot {
-                if let Some(lt) = st.translations.iter().find(|t| t.code == "LXX") {
-                    if let Ok(Some(text)) =
-                        st.bible.verse_text(lt.id, word.book, word.chapter, word.verse)
-                    {
-                        lxx = text;
-                        show_lxx = true;
-                    }
-                }
+            if is_ot
+                && let Some(lt) = st.translations.iter().find(|t| t.code == "LXX")
+                && let Ok(Some(text)) =
+                    st.bible.verse_text(lt.id, word.book, word.chapter, word.verse)
+            {
+                lxx = text;
+                show_lxx = true;
             }
 
             // Vulgate (Latin) verse reference — for both OT and NT words.
             let mut vulgate = String::new();
             let mut show_vulgate = false;
-            if let Some(vt) = st.translations.iter().find(|t| t.code == "VUL") {
-                if let Ok(Some(text)) =
+            if let Some(vt) = st.translations.iter().find(|t| t.code == "VUL")
+                && let Ok(Some(text)) =
                     st.bible.verse_text(vt.id, word.book, word.chapter, word.verse)
-                {
-                    vulgate = text;
-                    show_vulgate = true;
-                }
+            {
+                vulgate = text;
+                show_vulgate = true;
             }
 
             ui.set_word(WordInfo {
@@ -360,45 +355,44 @@ fn refresh_reading(ui: &MainWindow, state: &Rc<RefCell<State>>) {
 
     // ----- primary column -----
     let primary_rtl = st.translations[primary].rtl;
-    ui.set_primary_rtl(primary_rtl);
     ui.set_primary_title(
         format!("{} {} · {}", st.book_name(book), chapter, st.translations[primary].code).into(),
     );
+    ui.set_primary_subtitle(st.translations[primary].name.clone().into());
     if st.translations[primary].tagged {
         let budget = if parallel { 32 } else { 60 };
-        let (blocks, flat) = build_blocks(&st.bible, pid, book, chapter, primary_rtl, budget);
+        let (rows, flat) = tagged_rows(&st.bible, pid, book, chapter, primary_rtl, budget);
         st.primary_words = flat;
-        ui.set_primary_words(blocks);
-        ui.set_primary_tagged(true);
-        ui.set_verses(ModelRc::new(VecModel::default()));
+        ui.set_rows(rows);
     } else {
         let verses = st.bible.chapter(pid, book, chapter).unwrap_or_default();
-        ui.set_verses(verse_model(&verses));
-        ui.set_primary_tagged(false);
+        ui.set_rows(plain_rows(&verses, primary_rtl));
         st.primary_words.clear();
     }
 
-    // ----- secondary column (parallel) -----
+    // ----- secondary column (parallel only) -----
     let sid = st.secondary_id();
     let secondary_rtl = st.translations[secondary].rtl;
-    ui.set_secondary_rtl(secondary_rtl);
     ui.set_secondary_title(st.translations[secondary].name.clone().into());
-    if st.translations[secondary].tagged {
-        let (blocks, flat) = build_blocks(&st.bible, sid, book, chapter, secondary_rtl, 32);
+    if !parallel {
+        // keep the hidden column empty so it costs nothing to lay out
+        ui.set_rows2(ModelRc::new(VecModel::default()));
+        st.secondary_words.clear();
+    } else if st.translations[secondary].tagged {
+        let (rows, flat) = tagged_rows(&st.bible, sid, book, chapter, secondary_rtl, 32);
         st.secondary_words = flat;
-        ui.set_secondary_words(blocks);
-        ui.set_secondary_tagged(true);
-        ui.set_verses2(ModelRc::new(VecModel::default()));
+        ui.set_rows2(rows);
     } else {
         let verses2 = st.bible.chapter(sid, book, chapter).unwrap_or_default();
-        ui.set_verses2(verse_model(&verses2));
-        ui.set_secondary_tagged(false);
+        ui.set_rows2(plain_rows(&verses2, secondary_rtl));
         st.secondary_words.clear();
     }
 
     // clear word-selection highlight (indices change with the chapter)
     ui.set_selected_col(-1);
     ui.set_selected_idx(-1);
+    // send both columns back to the top of the new passage
+    ui.set_nav_epoch(ui.get_nav_epoch() + 1);
 }
 
 /// Display width of a word, ignoring Hebrew points / Greek combining accents.
@@ -408,19 +402,19 @@ fn display_width(s: &str) -> usize {
         .count()
 }
 
-/// Build wrapped verse blocks for a tagged translation, plus the flat word
-/// list (indexed by the chip `idx` used for click lookups).
-fn build_blocks(
+/// Build wrapped word rows for a tagged translation, plus the flat word list
+/// (indexed by the chip `idx` used for click lookups).
+fn tagged_rows(
     bible: &Bible,
     tid: i64,
     book: i64,
     chapter: i64,
     rtl: bool,
     budget: usize,
-) -> (ModelRc<VerseBlock>, Vec<Word>) {
+) -> (ModelRc<VerseRow>, Vec<Word>) {
     let verses = bible.chapter(tid, book, chapter).unwrap_or_default();
     let mut flat: Vec<Word> = Vec::new();
-    let mut blocks: Vec<VerseBlock> = Vec::new();
+    let mut blocks: Vec<VerseRow> = Vec::new();
 
     for v in &verses {
         let words = bible.words(tid, book, chapter, v.verse).unwrap_or_default();
@@ -446,9 +440,11 @@ fn build_blocks(
             lines.push(make_line(cur, rtl));
         }
         flat.extend(words);
-        blocks.push(VerseBlock {
+        blocks.push(VerseRow {
             verse: v.verse as i32,
+            text: SharedString::default(),
             lines: ModelRc::new(VecModel::from(lines)),
+            tagged: true,
             rtl,
         });
     }
@@ -462,10 +458,17 @@ fn make_line(mut chips: Vec<WordChip>, rtl: bool) -> WordLine {
     WordLine { words: ModelRc::new(VecModel::from(chips)) }
 }
 
-fn verse_model(verses: &[bible::Verse]) -> ModelRc<VerseItem> {
-    let items: Vec<VerseItem> = verses
+/// Build plain prose rows for an untagged translation.
+fn plain_rows(verses: &[bible::Verse], rtl: bool) -> ModelRc<VerseRow> {
+    let items: Vec<VerseRow> = verses
         .iter()
-        .map(|v| VerseItem { verse: v.verse as i32, text: v.text.clone().into() })
+        .map(|v| VerseRow {
+            verse: v.verse as i32,
+            text: v.text.clone().into(),
+            lines: ModelRc::new(VecModel::default()),
+            tagged: false,
+            rtl,
+        })
         .collect();
     ModelRc::new(VecModel::from(items))
 }

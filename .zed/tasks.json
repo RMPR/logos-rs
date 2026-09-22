@@ -1,0 +1,86 @@
+// Project tasks for logos-rs. Spawn with `task: spawn` from the command
+// palette, or re-run the last one with `task: rerun`.
+// Docs: https://zed.dev/docs/tasks
+[
+  {
+    "label": "Run",
+    "command": "cargo",
+    "args": ["run", "--bin", "logos-rs"],
+    "save": "all",
+    "reveal": "always",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false
+  },
+  {
+    "label": "Run (release)",
+    "command": "cargo",
+    "args": ["run", "--release", "--bin", "logos-rs"],
+    "save": "all",
+    "reveal": "always",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false
+  },
+  {
+    "label": "Build",
+    "command": "cargo",
+    "args": ["build"],
+    "save": "all",
+    "reveal": "always"
+  },
+  {
+    "label": "Build (release)",
+    "command": "cargo",
+    "args": ["build", "--release"],
+    "save": "all",
+    "reveal": "always"
+  },
+  {
+    "label": "Check",
+    // Also compiles ui/app.slint through build.rs, so this catches .slint
+    // errors as well as Rust ones.
+    "command": "cargo",
+    "args": ["check", "--all-targets"],
+    "save": "all",
+    "reveal": "always"
+  },
+  {
+    "label": "Test",
+    "command": "cargo",
+    "args": ["test"],
+    "save": "all",
+    "reveal": "always"
+  },
+  {
+    "label": "Test (current file)",
+    // $ZED_STEM is the open file's name without its extension, which matches
+    // the module path for src/<module>.rs.
+    "command": "cargo",
+    "args": ["test", "$ZED_STEM::"],
+    "save": "all",
+    "reveal": "always"
+  },
+  {
+    "label": "Clippy",
+    "command": "cargo",
+    "args": ["clippy", "--all-targets", "--", "-D", "warnings"],
+    "save": "all",
+    "reveal": "always"
+  },
+  {
+    "label": "Format",
+    "command": "cargo",
+    "args": ["fmt"],
+    "save": "all",
+    "reveal": "no_focus",
+    "hide": "on_success"
+  },
+  {
+    "label": "Rebuild Bible database",
+    // Replaces data/bible.db from the vendored sources (offline, ~10s); the
+    // importer drops the old file itself. The app does this on first run too.
+    "command": "cargo",
+    "args": ["run", "--bin", "import"],
+    "reveal": "always",
+    "allow_concurrent_runs": false
+  }
+]

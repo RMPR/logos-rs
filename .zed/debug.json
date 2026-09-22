@@ -1,0 +1,57 @@
+// Debug configurations for logos-rs. Start one with `debugger: start` from the
+// command palette (or the Debug panel's "New Process" button).
+//
+// Zed's cargo locator turns the `build` block into the right executable, so no
+// explicit "program" path is needed — it reads it back from cargo's JSON output.
+// Docs: https://zed.dev/docs/debugger
+[
+  {
+    // CodeLLDB understands Rust's std types (String, Vec, Option) out of the
+    // box. Zed downloads the adapter the first time this is run.
+    "label": "Debug logos-rs (CodeLLDB)",
+    "adapter": "CodeLLDB",
+    "request": "launch",
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "build": {
+      "label": "Build logos-rs (debug)",
+      "command": "cargo",
+      "args": ["build", "--bin", "logos-rs"]
+    }
+  },
+  {
+    // Uses the system gdb, already installed here — no adapter download.
+    "label": "Debug logos-rs (GDB)",
+    "adapter": "GDB",
+    "request": "launch",
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "build": {
+      "label": "Build logos-rs (debug)",
+      "command": "cargo",
+      "args": ["build", "--bin", "logos-rs"]
+    }
+  },
+  {
+    // The locator adds `--no-run` and attaches to the built test binary.
+    "label": "Debug tests (CodeLLDB)",
+    "adapter": "CodeLLDB",
+    "request": "launch",
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "build": {
+      "label": "Build tests",
+      "command": "cargo",
+      "args": ["test"]
+    }
+  },
+  {
+    // The database importer — handy when a source file fails to parse.
+    "label": "Debug import (CodeLLDB)",
+    "adapter": "CodeLLDB",
+    "request": "launch",
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "build": {
+      "label": "Build import",
+      "command": "cargo",
+      "args": ["build", "--bin", "import"]
+    }
+  }
+]

@@ -11,6 +11,8 @@ study experience that runs natively on Linux with a cleaner, faster UX.
 - **Reading view** with hanging-indent verse numbers and a Logos-style three-pane
   layout (translation/book/chapter nav · reading pane).
 - **Parallel view** — read two translations side by side, aligned by verse.
+  Their scrolling is locked together by default (the same verse stays at the
+  top of both columns); the **🔗 Linked** pill unlocks them to scroll freely.
 - **Word study** — in the original-language texts (Hebrew OT, Greek NT) every word
   is clickable. A side panel shows the surface form, transliteration, lemma,
   Strong's number, full morphological parsing, gloss, and definition — inspired by
