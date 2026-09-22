@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use logos_rs::bible::{self, Bible, Book, SearchHit, Translation, Word};
@@ -21,6 +22,75 @@ struct State {
     /// Flat per-chapter word lists for the two columns, indexed by chip idx.
     primary_words: Vec<Word>,
     secondary_words: Vec<Word>,
+    /// Corpus frequency of every lexeme in `freq_tid`, for the reader's
+    /// edition. Built once per translation — it is a whole-corpus count.
+    freq: HashMap<String, i64>,
+    freq_tid: i64,
+    threshold_idx: usize,
+    /// Set once the reader picks a cut-off by hand, after which the per-corpus
+    /// default stops overriding it.
+    threshold_pinned: bool,
+    /// Language the current cut-off was chosen for.
+    threshold_lang: String,
+}
+
+/// Frequency cut-offs offered for the reader's apparatus. A word is glossed
+/// when its lexeme occurs fewer than this many times in the corpus.
+const THRESHOLDS: [i64; 6] = [10, 25, 30, 50, 100, 200];
+
+/// A reader's edition is an original-language text: the apparatus glosses the
+/// Hebrew or Greek a reader is working through. The Strong's-tagged modern
+/// translations carry no morphology of their own to parse.
+fn is_original_language(lang: &str) -> bool {
+    lang == "hbo" || lang == "grc"
+}
+
+/// The cut-off printed reader's editions settle on for each corpus: fewer than
+/// 100× for the Hebrew Bible (as in Zondervan's reader's Hebrew Bible), fewer
+/// than 30× for the Greek New Testament (as in the UBS reader's edition).
+fn default_threshold(lang: &str) -> usize {
+    match lang {
+        "hbo" => 4, // 100
+        "grc" => 2, // 30
+        _ => 3,     // 50
+    }
+}
+
+/// Proper names carry nothing a reader needs looked up — every translation
+/// simply transliterates them — so printed reader's editions leave them out of
+/// the apparatus. The Hebrew morphology tags them (`Np` opening any segment of
+/// the OSHM code); MorphGNT has no such tag, but the Greek text capitalises the
+/// lemma of a name and nothing else.
+fn is_proper_noun(w: &Word) -> bool {
+    if w.lemma.chars().next().is_some_and(char::is_uppercase) {
+        return true;
+    }
+    // The language letter (H Hebrew / A Aramaic) prefixes only the first
+    // segment, so strip it before testing. Guards against `VNp…` — a Niphal
+    // perfect verb, which merely contains "Np".
+    w.morph
+        .split('/')
+        .any(|seg| seg.strip_prefix(['H', 'A']).unwrap_or(seg).starts_with("Np"))
+}
+
+/// What the apparatus needs while a chapter is laid out.
+struct Reader<'a> {
+    freq: &'a HashMap<String, i64>,
+    max_freq: i64,
+}
+
+impl Reader<'_> {
+    /// Worth glossing: rare enough in the corpus, known to the lexicon, and
+    /// not a name.
+    fn glosses(&self, w: &Word) -> bool {
+        !w.strongs.is_empty()
+            && self.freq.get(&w.strongs).is_some_and(|&n| n < self.max_freq)
+            && !is_proper_noun(w)
+    }
+
+    fn count(&self, strongs: &str) -> i64 {
+        self.freq.get(strongs).copied().unwrap_or(0)
+    }
 }
 
 impl State {
@@ -58,6 +128,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Default secondary = a different translation if available (LSG).
     let secondary = if translations.len() > 1 { 1 } else { 0 };
     let primary_books = bible.books(translations[0].id)?;
+    let start_lang = translations[0].lang.clone();
+    let threshold_idx = default_threshold(&start_lang);
 
     let state = Rc::new(RefCell::new(State {
         bible,
@@ -70,6 +142,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         last_results: Vec::new(),
         primary_words: Vec::new(),
         secondary_words: Vec::new(),
+        freq: HashMap::new(),
+        freq_tid: 0,
+        threshold_idx,
+        threshold_pinned: false,
+        threshold_lang: start_lang,
     }));
 
     let ui = MainWindow::new()?;
@@ -83,6 +160,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|t| format!("{} — {}", t.code, t.name).into())
             .collect();
         ui.set_translation_labels(ModelRc::new(VecModel::from(labels)));
+
+        let thresholds: Vec<SharedString> =
+            THRESHOLDS.iter().map(|n| format!("fewer than {n}×").into()).collect();
+        ui.set_threshold_labels(ModelRc::new(VecModel::from(thresholds)));
+        ui.set_threshold_index(st.threshold_idx as i32);
     }
 
     refresh_books(&ui, &state.borrow());
@@ -166,6 +248,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.on_toggle_parallel(move || {
             let ui = w.unwrap();
             ui.set_parallel(!ui.get_parallel());
+            refresh_reading(&ui, &state);
+        });
+    }
+    {
+        let (w, state) = ctx!();
+        ui.on_toggle_reader(move || {
+            let ui = w.unwrap();
+            ui.set_reader(!ui.get_reader());
+            refresh_reading(&ui, &state);
+        });
+    }
+    {
+        let (w, state) = ctx!();
+        ui.on_threshold_changed(move |idx| {
+            let ui = w.unwrap();
+            {
+                let mut st = state.borrow_mut();
+                st.threshold_idx = (idx as usize).min(THRESHOLDS.len() - 1);
+                st.threshold_pinned = true;
+            }
             refresh_reading(&ui, &state);
         });
     }
@@ -355,19 +457,53 @@ fn refresh_reading(ui: &MainWindow, state: &Rc<RefCell<State>>) {
 
     // ----- primary column -----
     let primary_rtl = st.translations[primary].rtl;
+    let lang = st.translations[primary].lang.clone();
+    let reader_capable = st.translations[primary].tagged && is_original_language(&lang);
+
+    // Each corpus has its own conventional cut-off, so follow the text unless
+    // the reader has chosen one explicitly.
+    if !st.threshold_pinned && st.threshold_lang != lang {
+        st.threshold_idx = default_threshold(&lang);
+        st.threshold_lang = lang.clone();
+        ui.set_threshold_index(st.threshold_idx as i32);
+    }
     ui.set_primary_title(
         format!("{} {} · {}", st.book_name(book), chapter, st.translations[primary].code).into(),
     );
     ui.set_primary_subtitle(st.translations[primary].name.clone().into());
+
+    // The reader's apparatus needs whole-corpus counts; build them once per
+    // translation, and only when the reader actually asks for them.
+    ui.set_reader_available(reader_capable);
+    let reader_on = reader_capable && ui.get_reader();
+    if reader_on && st.freq_tid != pid {
+        let freq = st.bible.lexeme_frequencies(pid).unwrap_or_default();
+        st.freq = freq;
+        st.freq_tid = pid;
+    }
+
     if st.translations[primary].tagged {
         let budget = if parallel { 32 } else { 60 };
-        let (rows, flat) = tagged_rows(&st.bible, pid, book, chapter, primary_rtl, budget);
-        st.primary_words = flat;
+        let max_freq = THRESHOLDS[st.threshold_idx.min(THRESHOLDS.len() - 1)];
+        let reader = reader_on.then(|| Reader { freq: &st.freq, max_freq });
+        let (rows, flat) =
+            tagged_rows(&st.bible, pid, book, chapter, primary_rtl, budget, reader.as_ref());
         ui.set_rows(rows);
+        if let Some(r) = &reader {
+            let notes = gloss_notes(&flat, r, primary_rtl);
+            ui.set_reader_caption(
+                reader_caption(&st.translations[primary], max_freq, notes.len()).into(),
+            );
+            ui.set_notes(ModelRc::new(VecModel::from(notes)));
+        }
+        st.primary_words = flat;
     } else {
         let verses = st.bible.chapter(pid, book, chapter).unwrap_or_default();
         ui.set_rows(plain_rows(&verses, primary_rtl));
         st.primary_words.clear();
+    }
+    if !reader_on {
+        ui.set_notes(ModelRc::new(VecModel::default()));
     }
 
     // ----- secondary column (parallel only) -----
@@ -379,7 +515,7 @@ fn refresh_reading(ui: &MainWindow, state: &Rc<RefCell<State>>) {
         ui.set_rows2(ModelRc::new(VecModel::default()));
         st.secondary_words.clear();
     } else if st.translations[secondary].tagged {
-        let (rows, flat) = tagged_rows(&st.bible, sid, book, chapter, secondary_rtl, 32);
+        let (rows, flat) = tagged_rows(&st.bible, sid, book, chapter, secondary_rtl, 32, None);
         st.secondary_words = flat;
         ui.set_rows2(rows);
     } else {
@@ -411,6 +547,7 @@ fn tagged_rows(
     chapter: i64,
     rtl: bool,
     budget: usize,
+    reader: Option<&Reader>,
 ) -> (ModelRc<VerseRow>, Vec<Word>) {
     let verses = bible.chapter(tid, book, chapter).unwrap_or_default();
     let mut flat: Vec<Word> = Vec::new();
@@ -433,6 +570,7 @@ fn tagged_rows(
                 idx: (base + i) as i32,
                 text: w.text.clone().into(),
                 tagged: !w.strongs.is_empty(),
+                rare: reader.is_some_and(|r| r.glosses(w)),
             });
             width += ww;
         }
@@ -456,6 +594,65 @@ fn make_line(mut chips: Vec<WordChip>, rtl: bool) -> WordLine {
         chips.reverse(); // right-to-left reading order within the line
     }
     WordLine { words: ModelRc::new(VecModel::from(chips)) }
+}
+
+/// The reader's-edition apparatus for one chapter: every lexeme rarer than the
+/// chosen cut-off, in reading order.
+///
+/// A word is listed once per verse, as printed reader's editions do — a rare
+/// word repeated within a verse is looked up once, but a reader returning to it
+/// in a later verse should not have to hunt back up the page.
+fn gloss_notes(words: &[Word], reader: &Reader, rtl: bool) -> Vec<GlossItem> {
+    let mut seen: HashSet<(i64, &str)> = HashSet::new();
+    let mut notes: Vec<GlossItem> = Vec::new();
+    for w in words {
+        if !reader.glosses(w) || !seen.insert((w.verse, &w.strongs)) {
+            continue;
+        }
+        notes.push(GlossItem {
+            verse: w.verse as i32,
+            surface: w.text.clone().into(),
+            lemma: w.lemma.clone().into(),
+            parsing: w.parsing.clone().into(),
+            gloss: short_gloss(&w.gloss, &w.definition).into(),
+            count: format!("{}×", reader.count(&w.strongs)).into(),
+            rtl,
+        });
+    }
+    notes
+}
+
+/// Shorten a lexicon entry to the senses that fit one apparatus line. Falls
+/// back to the long definition for the entries that carry no short gloss.
+fn short_gloss(gloss: &str, definition: &str) -> String {
+    let source = if gloss.trim().is_empty() { definition } else { gloss };
+    // The Hebrew entries separate senses with semicolons and the Greek ones
+    // with commas, so split on whichever this entry actually uses.
+    let sep = if source.contains(';') { ';' } else { ',' };
+    let senses: Vec<&str> =
+        source.split(sep).map(str::trim).filter(|s| !s.is_empty()).take(3).collect();
+    let joined = senses.join(", ");
+    match joined.char_indices().nth(64) {
+        Some((cut, _)) => format!("{}…", joined[..cut].trim_end()),
+        None => joined,
+    }
+}
+
+/// The line above the apparatus, naming the corpus the counts are taken over.
+///
+/// Deliberately free of the book name: the header already carries it, and a
+/// Hebrew name opening a Latin sentence flips the whole line under the
+/// bidirectional text algorithm.
+fn reader_caption(trans: &Translation, max_freq: i64, entries: usize) -> String {
+    let corpus = match trans.lang.as_str() {
+        "hbo" => "the Hebrew Bible".to_string(),
+        "grc" => "the Greek New Testament".to_string(),
+        _ => trans.name.clone(),
+    };
+    format!(
+        "{entries} word{} occurring fewer than {max_freq}× in {corpus}",
+        if entries == 1 { "" } else { "s" }
+    )
 }
 
 /// Build plain prose rows for an untagged translation.

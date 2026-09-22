@@ -13,6 +13,13 @@ study experience that runs natively on Linux with a cleaner, faster UX.
 - **Parallel view** — read two translations side by side, aligned by verse.
   Their scrolling is locked together by default (the same verse stays at the
   top of both columns); the **🔗 Linked** pill unlocks them to scroll freely.
+- **Reader's edition** — open the Hebrew OT (WLC) or Greek NT (SBLGNT) and hit
+  **📖 Reader**: every word rarer than the chosen cut-off is ruled in the text and
+  glossed below it with its dictionary form, full parsing and corpus frequency, so
+  a chapter can be read straight through without a lexicon. Defaults follow the
+  printed editions — fewer than 100× for the Hebrew Bible, fewer than 30× for the
+  Greek NT — and proper names are left out, as they are in print. No complete
+  parsed Hebrew OT exists in book or PDF form; this is that, generated per chapter.
 - **Word study** — in the original-language texts (Hebrew OT, Greek NT) every word
   is clickable. A side panel shows the surface form, transliteration, lemma,
   Strong's number, full morphological parsing, gloss, and definition — inspired by

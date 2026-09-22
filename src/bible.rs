@@ -1,5 +1,6 @@
 //! Read-only data model over `bible.db`.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OptionalExtension};
@@ -26,6 +27,7 @@ pub struct Word {
     pub lemma: String,      // dictionary headword
     pub translit: String,
     pub strongs: String,    // "" if none
+    pub morph: String,      // raw morphology code (OSHM / MorphGNT)
     pub parsing: String,
     pub gloss: String,
     pub definition: String,
@@ -66,6 +68,7 @@ const WORD_SELECT: &str = "SELECT w.book, w.chapter, w.verse, w.position, w.text
         COALESCE(NULLIF(w.lemma,''), l.lemma, '') AS lemma,
         COALESCE(l.translit,'')   AS translit,
         COALESCE(w.strongs,'')    AS strongs,
+        COALESCE(w.morph,'')      AS morph,
         COALESCE(w.parsing,'')    AS parsing,
         COALESCE(l.gloss,'')      AS gloss,
         COALESCE(l.definition,'') AS definition
@@ -81,9 +84,10 @@ fn map_word(r: &rusqlite::Row) -> rusqlite::Result<Word> {
         lemma: r.get(5)?,
         translit: r.get(6)?,
         strongs: r.get(7)?,
-        parsing: r.get(8)?,
-        gloss: r.get(9)?,
-        definition: r.get(10)?,
+        morph: r.get(8)?,
+        parsing: r.get(9)?,
+        gloss: r.get(10)?,
+        definition: r.get(11)?,
     })
 }
 
@@ -225,6 +229,24 @@ impl Bible {
                 |r| r.get(0),
             )
             .optional()
+    }
+
+    /// How often each lexeme (Strong's number) occurs in a whole translation.
+    ///
+    /// This is what a reader's edition is built on: a word is glossed in the
+    /// apparatus when its lexeme is rare enough in the corpus that a reader is
+    /// unlikely to know it. Counting is per-corpus, so the Hebrew Bible and the
+    /// Greek New Testament each get their own scale.
+    pub fn lexeme_frequencies(&self, translation_id: i64) -> rusqlite::Result<HashMap<String, i64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT strongs, COUNT(*) FROM words \
+             WHERE translation_id = ?1 AND strongs IS NOT NULL AND strongs <> '' \
+             GROUP BY strongs",
+        )?;
+        let rows = stmt.query_map([translation_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        rows.collect()
     }
 
     /// Full-text search within one translation. Returns ranked verse snippets.
