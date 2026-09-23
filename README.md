@@ -10,9 +10,31 @@ study experience that runs natively on Linux with a cleaner, faster UX.
 
 - **Reading view** with hanging-indent verse numbers and a Logos-style three-pane
   layout (translation/book/chapter nav · reading pane).
-- **Parallel view** — read two translations side by side, aligned by verse.
-  Their scrolling is locked together by default (the same verse stays at the
-  top of both columns); the **🔗 Linked** pill unlocks them to scroll freely.
+- **Parallel view** — read two translations side by side, genuinely aligned:
+  locked (the default) renders both texts as a *single* list of paired verses,
+  so verse N always sits beside verse N and the columns cannot drift apart. The
+  **🔗 Linked** pill unlocks them into two independent scrollers.
+- **Search** — `Ctrl+F` jumps to the search box from anywhere. Hits are listed
+  in canonical order (Genesis → Revelation), and opening one lands on that verse,
+  tinted, rather than at the top of its chapter; **☰ Results** in the header
+  brings the list back, **✕ Close** dismisses it.
+- **Advanced search** — `Ctrl+Shift+F` (or **⌕ Advanced**) opens a reference card
+  for a small query language, typed into the same box. It runs over the tagged
+  Hebrew OT / Greek NT and shows the hits in whatever translation you are
+  reading, with the matching words marked — search in Greek, read the hits in
+  French. Whole-corpus, in memory, typically 20–150 ms.
+
+  ```text
+  G25   H430   lemma:ἀγαπάω   gloss:love      one word, by Strong's, lemma or gloss
+  [lemma:ἀγαπάω aorist active]                constraints on the SAME word
+  tense: voice: mood: case: number: gender: person: stem: state: — or the bare value
+  A B · A AND B · A OR B · NOT A · ( … )      per verse
+  A BEFORE/2 B · A AFTER/1 B · A NEAR/3 B    word order, within n words
+  [verb aorist] BEFORE/1 lemma:θεός           an aorist verb right before "God"
+  ```
+- **Picks up where you left off** — the passage, both translations, which panes
+  were open, the theme and the window size are restored on the next launch
+  (`~/.config/logos-rs/session.json`, or `$LOGOS_SESSION`).
 - **Reader's edition** — open the Hebrew OT (WLC) or Greek NT (SBLGNT) and hit
   **📖 Reader**: every word rarer than the chosen cut-off is ruled in the text and
   glossed below it with its dictionary form, full parsing and corpus frequency, so
@@ -120,7 +142,10 @@ Database tables: `translations`, `books`, `verses` (+ `verses_fts`),
   edition exists (Louis Segond, ESV), the correspondence is *built* by IBM-Model-1
   word alignment (translation ↔ the Strong's in each verse from WLC/SBLGNT). Content
   words align well; some words are left untagged or occasionally mis-attached.
-  Regenerate with `tools/build_strongs.py <db> <CODE> <out.json>`.
+  Regenerate with `tools/build_strongs.py <db> <CODE> <out.json>`; for the
+  EPUB-derived texts add `--source data/<slug>.json` (the output of
+  `tools/epub2json.py`), since they enter the database only through this
+  script's output.
 - **LXX reverse lookup is verse-level**: no open, license-clean Septuagint is
   word-aligned to the Hebrew or carries Strong's, so an OT English click shows the
   precise Hebrew word but the LXX as the whole parallel verse (not the single Greek

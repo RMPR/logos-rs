@@ -2,9 +2,11 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use logos_rs::bible::{self, Bible, Book, SearchHit, Translation, Word};
+use logos_rs::bible::{self, Bible, Book, HIT_CLOSE, HIT_OPEN, SearchHit, Translation, Word};
 use logos_rs::canon::Section;
 use logos_rs::reference;
+use logos_rs::search::{self, Corpus, Lexicon, VerseId};
+use logos_rs::session::{self, Session};
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
 slint::include_modules!();
@@ -32,6 +34,15 @@ struct State {
     threshold_pinned: bool,
     /// Language the current cut-off was chosen for.
     threshold_lang: String,
+    /// Verse to scroll to on the next refresh (a search hit); consumed by it,
+    /// so every other navigation lands at the top of the chapter.
+    target_verse: Option<i64>,
+    /// Advanced search runs in memory over whole translations; each is read
+    /// from the database once, on first use, and kept.
+    corpora: HashMap<i64, Rc<Corpus>>,
+    lexicon: Option<Rc<Lexicon>>,
+    /// Background loads in flight (see `spawn_preload`).
+    loading: Vec<std::sync::mpsc::Receiver<Preloaded>>,
 }
 
 /// Frequency cut-offs offered for the reader's apparatus. A word is glossed
@@ -94,6 +105,31 @@ impl Reader<'_> {
 }
 
 impl State {
+    /// The in-memory corpus of a translation, loaded on first use.
+    fn corpus(&mut self, tid: i64) -> Rc<Corpus> {
+        if let Some(c) = self.corpora.get(&tid) {
+            return c.clone();
+        }
+        let hebrew = self.translations.iter().any(|t| t.id == tid && t.lang == "hbo");
+        let rows = self.bible.corpus_words(tid).unwrap_or_default();
+        let c = Rc::new(Corpus::build(rows, hebrew));
+        self.corpora.insert(tid, c.clone());
+        c
+    }
+
+    fn lexicon(&mut self) -> Rc<Lexicon> {
+        if let Some(l) = &self.lexicon {
+            return l.clone();
+        }
+        let l = Rc::new(Lexicon::new(self.bible.lexicon_rows().unwrap_or_default()));
+        self.lexicon = Some(l.clone());
+        l
+    }
+
+    fn translation_by_code(&self, code: &str) -> Option<&Translation> {
+        self.translations.iter().find(|t| t.code == code)
+    }
+
     fn primary_id(&self) -> i64 {
         self.translations[self.primary].id
     }
@@ -125,31 +161,99 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("no translations in database");
         std::process::exit(1);
     }
+    // Pick up where the last run left off. Every field is a hint: anything
+    // that no longer resolves falls back to the default.
+    let saved = session::load();
+    let primary = translations.iter().position(|t| t.code == saved.primary).unwrap_or(0);
     // Default secondary = a different translation if available (LSG).
-    let secondary = if translations.len() > 1 { 1 } else { 0 };
-    let primary_books = bible.books(translations[0].id)?;
-    let start_lang = translations[0].lang.clone();
-    let threshold_idx = default_threshold(&start_lang);
+    let secondary = translations
+        .iter()
+        .position(|t| t.code == saved.secondary)
+        .unwrap_or(if translations.len() > 1 { 1 } else { 0 });
+    let primary_books = bible.books(translations[primary].id)?;
+    // The saved book may not exist in this translation (the NT-only texts, a
+    // rebuilt database); fall back to its first book, and to its opening
+    // chapter — a chapter number carried over from a different book is
+    // meaningless.
+    let (book, chapter) = match primary_books.iter().any(|b| b.nr == saved.book) {
+        true => (saved.book, saved.chapter.max(1)),
+        false => (primary_books.first().map_or(1, |b| b.nr), 1),
+    };
+    let start_lang = translations[primary].lang.clone();
+    // A cut-off is remembered only when it was chosen by hand, and by value —
+    // so it survives the list of offered cut-offs changing.
+    let pinned = saved.threshold.and_then(|v| THRESHOLDS.iter().position(|&t| t == v));
+    let threshold_idx = pinned.unwrap_or_else(|| default_threshold(&start_lang));
 
     let state = Rc::new(RefCell::new(State {
         bible,
         translations,
-        primary: 0,
+        primary,
         secondary,
         primary_books,
-        book: 1,
-        chapter: 1,
+        book,
+        chapter,
         last_results: Vec::new(),
         primary_words: Vec::new(),
         secondary_words: Vec::new(),
         freq: HashMap::new(),
         freq_tid: 0,
         threshold_idx,
-        threshold_pinned: false,
+        threshold_pinned: pinned.is_some(),
         threshold_lang: start_lang,
+        target_verse: None,
+        corpora: HashMap::new(),
+        lexicon: None,
+        loading: Vec::new(),
     }));
 
     let ui = MainWindow::new()?;
+    restore(&ui, &saved, primary, secondary);
+
+    // Warm the advanced search: load the Hebrew, the Greek and the current
+    // translation in the background so the first query is instant.
+    {
+        let mut st = state.borrow_mut();
+        let jobs = preload_jobs(&st);
+        let rx = spawn_preload(db.clone(), jobs, true);
+        st.loading.push(rx);
+    }
+    let poll = slint::Timer::default();
+    {
+        let state = state.clone();
+        poll.start(slint::TimerMode::Repeated, std::time::Duration::from_millis(100), move || {
+            let mut st = state.borrow_mut();
+            let mut got = Vec::new();
+            let mut done = Vec::new();
+            for (i, rx) in st.loading.iter().enumerate() {
+                loop {
+                    match rx.try_recv() {
+                        Ok(p) => got.push(p),
+                        Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            done.push(i);
+                            break;
+                        }
+                    }
+                }
+            }
+            for i in done.into_iter().rev() {
+                st.loading.remove(i);
+            }
+            for p in got {
+                match p {
+                    Preloaded::Corpus(tid, c) => {
+                        st.corpora.entry(tid).or_insert_with(|| Rc::new(*c));
+                    }
+                    Preloaded::Lexicon(l) => {
+                        if st.lexicon.is_none() {
+                            st.lexicon = Some(Rc::new(l));
+                        }
+                    }
+                }
+            }
+        });
+    }
 
     // Static: translation labels for the combo boxes.
     {
@@ -216,6 +320,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     {
         let (w, state) = ctx!();
+        let db_for_preload = db.clone();
         ui.on_primary_changed(move |idx| {
             let ui = w.unwrap();
             {
@@ -233,6 +338,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             refresh_books(&ui, &state.borrow());
             refresh_reading(&ui, &state);
+            {
+                let mut st = state.borrow_mut();
+                let jobs = preload_jobs(&st);
+                if !jobs.is_empty() {
+                    let rx = spawn_preload(db_for_preload.clone(), jobs, false);
+                    st.loading.push(rx);
+                }
+            }
         });
     }
     {
@@ -260,6 +373,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
     {
+        let (w, _state) = ctx!();
+        ui.on_toggle_advanced(move || {
+            let ui = w.unwrap();
+            ui.set_advanced(!ui.get_advanced());
+            if ui.get_advanced() {
+                ui.set_focus_search(ui.get_focus_search() + 1);
+            }
+        });
+    }
+    {
         let (w, state) = ctx!();
         ui.on_threshold_changed(move |idx| {
             let ui = w.unwrap();
@@ -272,11 +395,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
     {
-        let (w, _state) = ctx!();
+        let (w, state) = ctx!();
         ui.on_toggle_theme(move || {
             let ui = w.unwrap();
             let t = ui.global::<Theme>();
             t.set_dark(!t.get_dark());
+            save_session(&ui, &state.borrow());
+        });
+    }
+    {
+        let (w, state) = ctx!();
+        ui.on_toggle_scroll_lock(move || {
+            let ui = w.unwrap();
+            ui.set_scroll_lock(!ui.get_scroll_lock());
+            // Locked and unlocked are different views over different models,
+            // so the chapter has to be rebuilt for the one now on screen.
+            refresh_reading(&ui, &state);
         });
     }
     {
@@ -303,16 +437,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let mut st = state.borrow_mut();
                     st.book = hit.book;
                     st.chapter = hit.chapter;
+                    st.target_verse = Some(hit.verse);
                 }
+                // The list stays loaded behind the text: the "‹ Results" pill
+                // brings it back.
                 ui.set_show_results(false);
                 refresh_reading(&ui, &state);
             }
         });
     }
     {
-        let (w, _state) = ctx!();
+        let (w, state) = ctx!();
         ui.on_close_results(move || {
-            w.unwrap().set_show_results(false);
+            let ui = w.unwrap();
+            ui.set_show_results(false);
+            ui.set_results(ModelRc::new(VecModel::default()));
+            state.borrow_mut().last_results.clear();
         });
     }
     {
@@ -415,8 +555,69 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // Closing is the one moment the final window size is known, and the
+    // backstop for anything toggled since the last refresh.
+    {
+        let (w, state) = ctx!();
+        ui.window().on_close_requested(move || {
+            if let Some(ui) = w.upgrade() {
+                save_session(&ui, &state.borrow());
+            }
+            slint::CloseRequestResponse::HideWindow
+        });
+    }
+
     ui.run()?;
     Ok(())
+}
+
+/// Put the window back the way it was left, before the first refresh reads
+/// these flags.
+fn restore(ui: &MainWindow, saved: &Session, primary: usize, secondary: usize) {
+    ui.global::<Theme>().set_dark(saved.dark);
+    ui.set_parallel(saved.parallel);
+    ui.set_scroll_lock(saved.scroll_lock);
+    ui.set_reader(saved.reader);
+    ui.set_primary_index(primary as i32);
+    ui.set_secondary_index(secondary as i32);
+    // Guard against a degenerate saved size — a window restored at 1×1 would
+    // be unrecoverable without editing the file by hand.
+    if let (Some(w), Some(h)) = (saved.width, saved.height)
+        && w >= 640
+        && h >= 400
+    {
+        ui.window().set_size(slint::LogicalSize::new(w as f32, h as f32));
+    }
+}
+
+/// Persist the session — unless the window has not been shown yet, when it
+/// reports a size of 0×0 that would overwrite the one saved last run. Nothing
+/// has changed at that point anyway.
+fn save_session(ui: &MainWindow, st: &State) {
+    if ui.window().size().width == 0 {
+        return;
+    }
+    session::save(&snapshot(ui, st));
+}
+
+/// Everything worth carrying into the next launch.
+fn snapshot(ui: &MainWindow, st: &State) -> Session {
+    let size = ui.window().size().to_logical(ui.window().scale_factor());
+    Session {
+        primary: st.translations[st.primary].code.clone(),
+        secondary: st.translations[st.secondary].code.clone(),
+        book: st.book,
+        chapter: st.chapter,
+        parallel: ui.get_parallel(),
+        scroll_lock: ui.get_scroll_lock(),
+        reader: ui.get_reader(),
+        // Only a hand-picked cut-off is worth restoring; otherwise each corpus
+        // keeps its own conventional default.
+        threshold: st.threshold_pinned.then(|| THRESHOLDS[st.threshold_idx]),
+        dark: ui.global::<Theme>().get_dark(),
+        width: Some(size.width as u32),
+        height: Some(size.height as u32),
+    }
 }
 
 /// Build the sidebar book list with Old/New/Deuterocanon section headers.
@@ -482,13 +683,14 @@ fn refresh_reading(ui: &MainWindow, state: &Rc<RefCell<State>>) {
         st.freq_tid = pid;
     }
 
+    let primary_rows: Vec<VerseRow>;
     if st.translations[primary].tagged {
         let budget = if parallel { 32 } else { 60 };
         let max_freq = THRESHOLDS[st.threshold_idx.min(THRESHOLDS.len() - 1)];
         let reader = reader_on.then(|| Reader { freq: &st.freq, max_freq });
         let (rows, flat) =
             tagged_rows(&st.bible, pid, book, chapter, primary_rtl, budget, reader.as_ref());
-        ui.set_rows(rows);
+        primary_rows = rows;
         if let Some(r) = &reader {
             let notes = gloss_notes(&flat, r, primary_rtl);
             ui.set_reader_caption(
@@ -499,7 +701,7 @@ fn refresh_reading(ui: &MainWindow, state: &Rc<RefCell<State>>) {
         st.primary_words = flat;
     } else {
         let verses = st.bible.chapter(pid, book, chapter).unwrap_or_default();
-        ui.set_rows(plain_rows(&verses, primary_rtl));
+        primary_rows = plain_rows(&verses, primary_rtl);
         st.primary_words.clear();
     }
     if !reader_on {
@@ -510,18 +712,38 @@ fn refresh_reading(ui: &MainWindow, state: &Rc<RefCell<State>>) {
     let sid = st.secondary_id();
     let secondary_rtl = st.translations[secondary].rtl;
     ui.set_secondary_title(st.translations[secondary].name.clone().into());
+    let mut secondary_rows: Vec<VerseRow> = Vec::new();
     if !parallel {
-        // keep the hidden column empty so it costs nothing to lay out
-        ui.set_rows2(ModelRc::new(VecModel::default()));
+        // nothing to lay out when the second column is not on screen
         st.secondary_words.clear();
     } else if st.translations[secondary].tagged {
         let (rows, flat) = tagged_rows(&st.bible, sid, book, chapter, secondary_rtl, 32, None);
         st.secondary_words = flat;
-        ui.set_rows2(rows);
+        secondary_rows = rows;
     } else {
         let verses2 = st.bible.chapter(sid, book, chapter).unwrap_or_default();
-        ui.set_rows2(plain_rows(&verses2, secondary_rtl));
+        secondary_rows = plain_rows(&verses2, secondary_rtl);
         st.secondary_words.clear();
+    }
+
+    // Locked parallel reading is one list of paired verses rather than two
+    // lists kept in step, so only the view actually on screen is built.
+    let locked = parallel && ui.get_scroll_lock();
+    // A search hit lands on its verse: hand the view the row index (rows are
+    // in verse order but a translation may skip a verse, so look it up), or
+    // -1 for the top of the chapter.
+    let target = st.target_verse.take().map(|v| v as i32);
+    if locked {
+        let pairs = pair_rows(&primary_rows, &secondary_rows);
+        ui.set_target_index(row_index(pairs.iter().map(|p| p.verse), target));
+        ui.set_pairs(ModelRc::new(VecModel::from(pairs)));
+        ui.set_rows(ModelRc::new(VecModel::default()));
+        ui.set_rows2(ModelRc::new(VecModel::default()));
+    } else {
+        ui.set_target_index(row_index(primary_rows.iter().map(|r| r.verse), target));
+        ui.set_pairs(ModelRc::new(VecModel::default()));
+        ui.set_rows(ModelRc::new(VecModel::from(primary_rows)));
+        ui.set_rows2(ModelRc::new(VecModel::from(secondary_rows)));
     }
 
     // clear word-selection highlight (indices change with the chapter)
@@ -529,6 +751,10 @@ fn refresh_reading(ui: &MainWindow, state: &Rc<RefCell<State>>) {
     ui.set_selected_idx(-1);
     // send both columns back to the top of the new passage
     ui.set_nav_epoch(ui.get_nav_epoch() + 1);
+
+    // Every navigation, translation change and pane toggle lands here, which
+    // makes it the one place the session needs writing from.
+    save_session(ui, &st);
 }
 
 /// Display width of a word, ignoring Hebrew points / Greek combining accents.
@@ -548,7 +774,7 @@ fn tagged_rows(
     rtl: bool,
     budget: usize,
     reader: Option<&Reader>,
-) -> (ModelRc<VerseRow>, Vec<Word>) {
+) -> (Vec<VerseRow>, Vec<Word>) {
     let verses = bible.chapter(tid, book, chapter).unwrap_or_default();
     let mut flat: Vec<Word> = Vec::new();
     let mut blocks: Vec<VerseRow> = Vec::new();
@@ -586,7 +812,7 @@ fn tagged_rows(
             rtl,
         });
     }
-    (ModelRc::new(VecModel::from(blocks)), flat)
+    (blocks, flat)
 }
 
 fn make_line(mut chips: Vec<WordChip>, rtl: bool) -> WordLine {
@@ -656,8 +882,8 @@ fn reader_caption(trans: &Translation, max_freq: i64, entries: usize) -> String 
 }
 
 /// Build plain prose rows for an untagged translation.
-fn plain_rows(verses: &[bible::Verse], rtl: bool) -> ModelRc<VerseRow> {
-    let items: Vec<VerseRow> = verses
+fn plain_rows(verses: &[bible::Verse], rtl: bool) -> Vec<VerseRow> {
+    verses
         .iter()
         .map(|v| VerseRow {
             verse: v.verse as i32,
@@ -666,8 +892,34 @@ fn plain_rows(verses: &[bible::Verse], rtl: bool) -> ModelRc<VerseRow> {
             tagged: false,
             rtl,
         })
-        .collect();
-    ModelRc::new(VecModel::from(items))
+        .collect()
+}
+
+/// Position of `verse` among the rows a view shows, or -1 for none.
+fn row_index(verses: impl Iterator<Item = i32>, verse: Option<i32>) -> i32 {
+    match verse {
+        Some(v) => verses.enumerate().find(|(_, x)| *x == v).map_or(-1, |(i, _)| i as i32),
+        None => -1,
+    }
+}
+
+/// Pair the two translations verse by verse for the locked view.
+///
+/// Matched on verse number rather than position: versification differs between
+/// translations, so one may carry a verse the other does not. A missing side
+/// becomes an empty cell (`VerseRow::default()`, whose verse is 0) and the
+/// rest of the chapter stays aligned.
+fn pair_rows(left: &[VerseRow], right: &[VerseRow]) -> Vec<PairRow> {
+    let mut verses: Vec<i32> = left.iter().chain(right).map(|r| r.verse).collect();
+    verses.sort_unstable();
+    verses.dedup();
+    let cell = |rows: &[VerseRow], v: i32| {
+        rows.iter().find(|r| r.verse == v).cloned().unwrap_or_default()
+    };
+    verses
+        .iter()
+        .map(|&v| PairRow { verse: v, left: cell(left, v), right: cell(right, v) })
+        .collect()
 }
 
 /// Move the current chapter by `delta`, rolling over to adjacent books.
@@ -709,21 +961,23 @@ fn navigate_reference(state: &Rc<RefCell<State>>, text: &str) -> bool {
     true
 }
 
-/// Run a full-text search in the primary translation and show the results.
+/// Search. Plain words go to the full-text index of the translation being
+/// read; anything using the query language (fields, `[…]`, Strong's numbers,
+/// operators, morphology keywords) goes to the advanced engine.
 fn run_search(ui: &MainWindow, state: &Rc<RefCell<State>>, query: &str) {
+    if search::is_advanced(query) {
+        run_advanced(ui, state, query);
+        return;
+    }
     let hits = {
         let st = state.borrow();
-        st.bible.search(st.primary_id(), query, 200).unwrap_or_default()
+        // In canonical order a small cap would cut the list off in Genesis
+        // for a common word; the list view is lazy, so this costs nothing.
+        st.bible.search(st.primary_id(), query, 5000).unwrap_or_default()
     };
     let items: Vec<SearchItem> = hits
         .iter()
-        .map(|h| SearchItem {
-            label: format!("{} {}:{}", h.book_name, h.chapter, h.verse).into(),
-            snippet: h.snippet.clone().into(),
-            book: h.book as i32,
-            chapter: h.chapter as i32,
-            verse: h.verse as i32,
-        })
+        .map(search_item)
         .collect();
     let n = items.len();
     ui.set_results(ModelRc::new(VecModel::from(items)));
@@ -731,5 +985,179 @@ fn run_search(ui: &MainWindow, state: &Rc<RefCell<State>>, query: &str) {
         format!("{n} result{} for “{query}”", if n == 1 { "" } else { "s" }).into(),
     );
     ui.set_show_results(true);
+    // a new query starts at the top of the list; coming back from a hit does not
+    ui.set_search_epoch(ui.get_search_epoch() + 1);
     state.borrow_mut().last_results = hits;
+}
+
+/// Advanced search: evaluate the query over the original-language text —
+/// the Hebrew Bible for the OT, the Greek NT for the NT — and show the hits
+/// in the translation being read, marking the words that carry the matched
+/// Strong's numbers. Searching in Greek and reading the hits in French is the
+/// point; it is also more complete than a translation's own tags.
+fn run_advanced(ui: &MainWindow, state: &Rc<RefCell<State>>, query: &str) {
+    let started = std::time::Instant::now();
+    let node = match search::parse(query) {
+        Ok(n) => n,
+        Err(e) => {
+            ui.set_results(ModelRc::new(VecModel::default()));
+            ui.set_results_summary(format!("Cannot read that query: {e}").into());
+            ui.set_show_results(true);
+            state.borrow_mut().last_results.clear();
+            return;
+        }
+    };
+
+    let mut st = state.borrow_mut();
+    let lexicon = st.lexicon();
+    let primary = st.primary_id();
+    let mut loaded_ms: u128 = 0;
+    let t0 = std::time::Instant::now();
+    let target_words: Rc<Corpus> = st.corpus(primary);
+    loaded_ms += t0.elapsed().as_millis();
+    let originals: Vec<(i64, &str)> = [("WLC", "the Hebrew Bible"), ("SBLGNT", "the Greek New Testament")]
+        .iter()
+        .filter_map(|(code, label)| st.translation_by_code(code).map(|t| (t.id, *label)))
+        .collect();
+
+    let mut hits: Vec<SearchHit> = Vec::new();
+    let mut searched: Vec<&str> = Vec::new();
+    for (tid, label) in originals {
+        let t0 = std::time::Instant::now();
+        let corpus = st.corpus(tid);
+        loaded_ms += t0.elapsed().as_millis();
+        let compiled = search::Compiled::new(&node, &corpus, &lexicon);
+        let found = compiled.run(&corpus);
+        if !found.is_empty() {
+            searched.push(label);
+        }
+        for h in found {
+            let matched: HashSet<u32> = h.positions.iter().map(|&i| corpus.words[i].strongs).collect();
+            let snippet = if tid == primary {
+                // reading the original itself: mark the matched words
+                mark_words(&corpus, &h.verse, |i, _| h.positions.contains(&i))
+            } else {
+                // reading a translation: mark its words that carry a matched Strong's
+                let names: HashSet<&str> = matched.iter().map(|&s| corpus.strongs.name(s)).collect();
+                match target_words.span(h.verse) {
+                    Some(_) => mark_words(&target_words, &h.verse, |_, w| {
+                        w.strongs != 0 && names.contains(target_words.strongs.name(w.strongs))
+                    }),
+                    // The translation has no such verse (versification differs):
+                    // show the original rather than lose the hit.
+                    None => mark_words(&corpus, &h.verse, |i, _| h.positions.contains(&i)),
+                }
+            };
+            hits.push(SearchHit {
+                book: h.verse.book,
+                book_name: st.book_name(h.verse.book),
+                chapter: h.verse.chapter,
+                verse: h.verse.verse,
+                snippet,
+            });
+        }
+    }
+    hits.sort_by_key(|h| (h.book, h.chapter, h.verse));
+
+    let items: Vec<SearchItem> = hits
+        .iter()
+        .map(search_item)
+        .collect();
+    let n = items.len();
+    let scope = if searched.is_empty() { "the original text".to_string() } else { searched.join(" and ") };
+    let took = started.elapsed().as_millis();
+    let note = if loaded_ms > 50 { format!(" ({loaded_ms} ms of it loading the text, once)") } else { String::new() };
+    ui.set_results(ModelRc::new(VecModel::from(items)));
+    ui.set_results_summary(
+        format!(
+            "{n} result{} for “{query}” in {scope} · {took} ms{note}",
+            if n == 1 { "" } else { "s" }
+        )
+        .into(),
+    );
+    ui.set_show_results(true);
+    ui.set_search_epoch(ui.get_search_epoch() + 1);
+    st.last_results = hits;
+}
+
+/// What the background loader hands back to the UI thread.
+enum Preloaded {
+    Corpus(i64, Box<Corpus>),
+    Lexicon(Lexicon),
+}
+
+/// Read and build corpora on another thread, over its own connection, so the
+/// first advanced search does not pay several seconds for it. Results come
+/// back over a channel the UI thread drains on a timer.
+fn spawn_preload(
+    db: std::path::PathBuf,
+    jobs: Vec<(i64, bool)>,
+    lexicon: bool,
+) -> std::sync::mpsc::Receiver<Preloaded> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let Ok(bible) = Bible::open(&db) else { return };
+        if lexicon && let Ok(rows) = bible.lexicon_rows() {
+            let _ = tx.send(Preloaded::Lexicon(Lexicon::new(rows)));
+        }
+        for (tid, hebrew) in jobs {
+            if let Ok(rows) = bible.corpus_words(tid) {
+                let _ = tx.send(Preloaded::Corpus(tid, Box::new(Corpus::build(rows, hebrew))));
+            }
+        }
+    });
+    rx
+}
+
+/// Corpora the advanced search will need for the current reading setup that
+/// are not loaded yet: the two originals and the translation being read.
+fn preload_jobs(st: &State) -> Vec<(i64, bool)> {
+    let mut jobs = Vec::new();
+    for code in ["WLC", "SBLGNT"] {
+        if let Some(t) = st.translation_by_code(code) {
+            jobs.push((t.id, t.lang == "hbo"));
+        }
+    }
+    let pid = st.primary_id();
+    if !jobs.iter().any(|(id, _)| *id == pid) {
+        jobs.push((pid, false));
+    }
+    jobs.retain(|(id, _)| !st.corpora.contains_key(id));
+    jobs
+}
+
+/// A results row from a hit: the marked snippet as highlighted word chips,
+/// pre-wrapped into lines (Slint has no inline styling and no flow layout).
+fn search_item(h: &SearchHit) -> SearchItem {
+    let (lines, rtl) = search::hit_lines(&h.snippet, HIT_OPEN, HIT_CLOSE, 105);
+    let lines: Vec<HitLine> = lines
+        .into_iter()
+        .map(|ws| HitLine {
+            words: ModelRc::new(VecModel::from(
+                ws.into_iter().map(|(text, hit)| HitWord { text: text.into(), hit }).collect::<Vec<_>>(),
+            )),
+        })
+        .collect();
+    SearchItem {
+        label: format!("{} {}:{}", h.book_name, h.chapter, h.verse).into(),
+        snippet: h.snippet.clone().into(),
+        lines: ModelRc::new(VecModel::from(lines)),
+        rtl,
+        book: h.book as i32,
+        chapter: h.chapter as i32,
+        verse: h.verse as i32,
+    }
+}
+
+/// A verse's words joined into a line, the chosen ones wrapped in the hit
+/// markers (the same convention the full-text snippets use).
+fn mark_words(corpus: &Corpus, verse: &VerseId, pick: impl Fn(usize, &search::Word) -> bool) -> String {
+    let Some(span) = corpus.span(*verse) else { return String::new() };
+    (span.start..span.end)
+        .map(|i| {
+            let text = &corpus.display[i];
+            if pick(i, &corpus.words[i]) { format!("{HIT_OPEN}{text}{HIT_CLOSE}") } else { text.clone() }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }

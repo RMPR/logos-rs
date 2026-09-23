@@ -1,4 +1,4 @@
-import { ComboBox, LineEdit, ScrollView, ListView } from "std-widgets.slint";
+import { ComboBox, LineEdit, ScrollView, ListView, Palette } from "std-widgets.slint";
 
 // ---------------------------------------------------------------------------
 // Theme — all colours derive from a single `dark` switch.
@@ -24,7 +24,17 @@ export global Theme {
 // ---------------------------------------------------------------------------
 export struct TranslationItem { code: string, name: string }
 export struct BookItem { nr: int, name: string, header: bool }
-export struct SearchItem { label: string, snippet: string, book: int, chapter: int, verse: int }
+// A search hit's text, pre-wrapped into lines of words (Slint has no inline
+// styling, so a matched word is its own element, highlighted).
+export struct HitWord { text: string, hit: bool }
+export struct HitLine { words: [HitWord] }
+export struct SearchItem {
+    label: string,
+    snippet: string,
+    lines: [HitLine],
+    rtl: bool,
+    book: int, chapter: int, verse: int,
+}
 
 // Word-level (tagged original-language) structures. Verses are pre-wrapped
 // into lines on the Rust side (Slint has no flow layout).
@@ -54,6 +64,11 @@ export struct GlossItem {
     count: string,      // corpus frequency, e.g. "20×"
     rtl: bool,
 }
+
+// One verse across both translations, for the locked parallel view. A cell
+// whose `verse` is 0 is absent on that side — versification differs between
+// translations, so a verse can exist in one and not the other.
+export struct PairRow { verse: int, left: VerseRow, right: VerseRow }
 
 export struct OriginalWord { text: string, parsing: string }
 export struct WordInfo {
@@ -95,94 +110,272 @@ component Pill inherits Rectangle {
 }
 
 // ---------------------------------------------------------------------------
-// One reading column: a scrollable list of verses. Rows are either plain
-// prose or clickable, morphology-tagged words, depending on the row itself —
-// keeping it one ListView is what makes the column addressable for scroll
-// locking (elements inside a Slint `if` cannot be reached by name).
+// One verse in one column: the number, then either prose or clickable,
+// morphology-tagged words. Shared by the single-column and the paired views so
+// both render identically.
 // ---------------------------------------------------------------------------
-component ReadingColumn inherits ListView {
-    in property <[VerseRow]> rows;
+component VerseCell inherits Rectangle {
+    in property <VerseRow> verse-row;
     in property <int> column;          // 0 = primary, 1 = secondary
     in property <int> selected-col;
     in property <int> selected-idx;
+    /// The verse a search hit was opened on — tinted so the eye lands on it.
+    in property <bool> target;
     callback pick(int, int);           // (column, word index)
 
-    for r in rows: Rectangle {
-        // declared first so the word chips above it keep their own clicks
-        vtouch := TouchArea { }
-        background: (!r.tagged && vtouch.has-hover) ? Theme.panel : transparent;
-        HorizontalLayout {
-            padding: r.tagged ? 5px : 4px;
-            padding-left: 14px;
-            padding-right: 14px;
-            spacing: r.tagged ? 8px : 10px;
+    // a line the wrap budget mis-sized must not run across the divider
+    clip: true;
 
-            // verse number — leading, except for right-to-left word rows
-            if !r.tagged || !r.rtl: Text {
-                text: r.verse;
-                width: r.tagged ? 26px : 30px;
-                color: Theme.verse-num;
-                font-size: 12px;
-                horizontal-alignment: right;
-                vertical-alignment: top;
-                // nudge the small number to sit on the text baseline
-                y: r.tagged ? 4px : 3px;
-            }
+    // declared first so the word chips above it keep their own clicks
+    vtouch := TouchArea { }
+    background: root.target && root.verse-row.verse > 0
+        ? Theme.accent-bg
+        : (!root.verse-row.tagged && root.verse-row.verse > 0 && vtouch.has-hover)
+            ? Theme.panel
+            : transparent;
 
-            if !r.tagged: Text {
-                text: r.text;
-                color: Theme.text;
-                font-size: Theme.reading-size;
-                wrap: word-wrap;
-                horizontal-stretch: 1;
-                horizontal-alignment: r.rtl ? right : left;
-            }
+    HorizontalLayout {
+        padding: root.verse-row.tagged ? 5px : 4px;
+        padding-left: 14px;
+        padding-right: 14px;
+        spacing: root.verse-row.tagged ? 8px : 10px;
 
-            if r.tagged: VerticalLayout {
-                horizontal-stretch: 1;
-                spacing: 2px;
-                for line in r.lines: HorizontalLayout {
-                    spacing: 3px;
-                    alignment: r.rtl ? end : start;
-                    for w in line.words: Rectangle {
-                        border-radius: 4px;
-                        background: (root.column == root.selected-col && w.idx == root.selected-idx)
-                            ? Theme.accent-bg
-                            : (wtouch.has-hover ? Theme.panel-alt : transparent);
-                        HorizontalLayout {
-                            padding: 1px;
-                            padding-left: 3px;
-                            padding-right: 3px;
-                            Text {
-                                text: w.text;
-                                font-size: Theme.reading-size;
-                                color: w.tagged ? Theme.text : Theme.muted;
-                            }
+        // verse number — leading, except for right-to-left word rows
+        if root.verse-row.verse > 0 && (!root.verse-row.tagged || !root.verse-row.rtl): Text {
+            text: root.verse-row.verse;
+            width: root.verse-row.tagged ? 26px : 30px;
+            color: Theme.verse-num;
+            font-size: 12px;
+            horizontal-alignment: right;
+            vertical-alignment: top;
+            // nudge the small number to sit on the text baseline
+            y: root.verse-row.tagged ? 4px : 3px;
+        }
+
+        // In a paired row the shorter side is given the taller side's height;
+        // the text must sit at the top of that space, not be spread through
+        // it — hence top alignment here and `alignment: start` below.
+        if !root.verse-row.tagged: Text {
+            text: root.verse-row.text;
+            color: Theme.text;
+            font-size: Theme.reading-size;
+            wrap: word-wrap;
+            horizontal-stretch: 1;
+            horizontal-alignment: root.verse-row.rtl ? right : left;
+            vertical-alignment: top;
+        }
+
+        if root.verse-row.tagged: VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 2px;
+            alignment: start;
+            for line in root.verse-row.lines: HorizontalLayout {
+                spacing: 3px;
+                alignment: root.verse-row.rtl ? end : start;
+                for w in line.words: Rectangle {
+                    border-radius: 4px;
+                    background: (root.column == root.selected-col && w.idx == root.selected-idx)
+                        ? Theme.accent-bg
+                        : (wtouch.has-hover ? Theme.panel-alt : transparent);
+                    HorizontalLayout {
+                        padding: 1px;
+                        padding-left: 3px;
+                        padding-right: 3px;
+                        Text {
+                            text: w.text;
+                            font-size: Theme.reading-size;
+                            color: w.tagged ? Theme.text : Theme.muted;
                         }
-                        // Reader's edition: a rule under the words the
-                        // apparatus below glosses. Slint has no text
-                        // underline, so it is drawn.
-                        if w.rare: Rectangle {
-                            x: 2px;
-                            y: parent.height - 2px;
-                            width: parent.width - 4px;
-                            height: 1px;
-                            background: Theme.accent;
-                        }
-                        wtouch := TouchArea {
-                            clicked => { root.pick(root.column, w.idx); }
-                        }
+                    }
+                    // Reader's edition: a rule under the words the apparatus
+                    // below glosses. Slint has no text underline, so it is
+                    // drawn.
+                    if w.rare: Rectangle {
+                        x: 2px;
+                        y: parent.height - 2px;
+                        width: parent.width - 4px;
+                        height: 1px;
+                        background: Theme.accent;
+                    }
+                    wtouch := TouchArea {
+                        clicked => { root.pick(root.column, w.idx); }
                     }
                 }
             }
+        }
 
-            if r.tagged && r.rtl: Text {
-                text: r.verse;
-                width: 26px;
-                color: Theme.verse-num;
-                font-size: 12px;
-                y: 4px;
-            }
+        if root.verse-row.verse > 0 && root.verse-row.tagged && root.verse-row.rtl: Text {
+            text: root.verse-row.verse;
+            width: 26px;
+            color: Theme.verse-num;
+            font-size: 12px;
+            y: 4px;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Scroll-to-verse, shared by both column kinds.
+//
+// The columns are a ScrollView over a real VerticalLayout rather than a
+// ListView. A chapter is at most 176 verses, so laying every row out is cheap,
+// and it buys exactness: a ListView virtualises, positions rows from a moving
+// height estimate and recycles row instances, so there is no way to put a
+// given row at the top for certain — a search hit would land a verse or two
+// off. With a real layout each row's `y` is exact and stable, and landing on a
+// verse is simply `viewport-y = -y`.
+//
+// Rows publish their `y` when the layout assigns it; the timer reads it a
+// moment later, once layout has run.
+// ---------------------------------------------------------------------------
+component VerseScroller inherits Rectangle {
+    vertical-stretch: 1;
+    horizontal-stretch: 1;
+    /// Bumped by Rust on navigation: back to the top of the new chapter, or
+    /// onto `target-index` when a search hit named a verse.
+    in property <int> nav-epoch;
+    in property <int> target-index: -1;
+
+    // Armed by a navigation with a target; the target row disarms it when it
+    // has handed over its position. Guards the row's repeating timer, which
+    // otherwise does nothing.
+    property <bool> seeking;
+
+    // Called by the target row with its own `y`, read after layout. A row's
+    // position cannot be observed with a change callback instead: the tracker
+    // would initialise during the row's construction and force the layout to
+    // compute while the row is still being built.
+    public function land-at(y: length) {
+        if (!root.seeking) {
+            return;
+        }
+        // 0 before layout has placed the row (only row 0 sits at 0 for real)
+        if (y <= 0px && root.target-index > 0) {
+            return;
+        }
+        // never past the end: the last verses cannot reach the top
+        list.viewport-y = max(-y, list.visible-height - list.viewport-height);
+        root.seeking = false;
+    }
+
+    property <int> epoch-watch: root.nav-epoch;
+    changed epoch-watch => {
+        list.viewport-y = 0px;
+        root.seeking = root.target-index >= 0;
+    }
+    // Created with a target already set (the locked/unlocked views swapping):
+    // a change handler would only see edits made after creation.
+    init => { root.seeking = root.target-index >= 0; }
+
+    list := ScrollView {
+        // Fill the column explicitly. The std ScrollView prefers 100% of its
+        // parent, which reads the parent's height inside layout-info and,
+        // under the window's FocusScope, closes a loop with the window's own
+        // preferred size — so the preferred size is zeroed. But an element
+        // with a preferred size defaults to *that* size rather than to its
+        // parent's, so without these two lines the scroller is 0×0 and the
+        // chapter view is empty.
+        width: root.width;
+        height: root.height;
+        preferred-width: 0px;
+        preferred-height: 0px;
+        // The Flickable does not size its viewport from a layout placed here
+        // through @children, so bind it: the content is exactly as tall as
+        // the rows, and no wider than the view (so prose wraps to it).
+        viewport-width: self.visible-width;
+        viewport-height: body.preferred-height;
+        body := VerticalLayout {
+            width: list.visible-width;
+            @children
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A single translation, scrolling on its own.
+// ---------------------------------------------------------------------------
+component ReadingColumn inherits VerseScroller {
+    in property <[VerseRow]> rows;
+    in property <int> column;
+    in property <int> selected-col;
+    in property <int> selected-idx;
+    callback pick(int, int);
+
+    for r[i] in root.rows: VerseCell {
+        verse-row: r;
+        column: root.column;
+        selected-col: root.selected-col;
+        selected-idx: root.selected-idx;
+        target: i == root.target-index;
+        pick(c, i) => { root.pick(c, i); }
+        // only the target row's timer runs; it reads y once layout has run
+        Timer {
+            interval: 50ms;
+            running: i == root.target-index;
+            triggered => { root.land-at(parent.y); }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The locked parallel view: both translations in ONE list, verse beside verse.
+//
+// This is what makes locked scrolling exact rather than approximate. Two
+// scrollers can only ever be kept in step by estimating where one has got to
+// and mapping that onto the other, and they drift apart. Here there is a
+// single scroller and a single row per verse, the taller side setting the
+// height, so the columns cannot come apart at all.
+// ---------------------------------------------------------------------------
+component PairedColumn inherits VerseScroller {
+    in property <[PairRow]> rows;
+    in property <int> selected-col;
+    in property <int> selected-idx;
+    callback pick(int, int);
+
+    // A plain Rectangle per row, cells placed by hand — not a HorizontalLayout.
+    // A layout row would need each cell's height to size itself, each cell's
+    // height depends on its width (wrapped text), and the cell widths would be
+    // that same layout's own solved outputs: a height-for-width cycle Slint
+    // cannot resolve. Here the widths come straight from the row's width,
+    // which the body assigns in its width pass, independent of any height.
+    for p[i] in root.rows: Rectangle {
+        height: max(lcell.preferred-height, rcell.preferred-height);
+        // only the target row's timer runs; it reads y once layout has run
+        Timer {
+            interval: 50ms;
+            running: i == root.target-index;
+            triggered => { root.land-at(parent.y); }
+        }
+        lcell := VerseCell {
+            x: 0;
+            y: 0;
+            width: (parent.width - 1px) / 2;
+            height: parent.height;
+            verse-row: p.left;
+            column: 0;
+            selected-col: root.selected-col;
+            selected-idx: root.selected-idx;
+            target: i == root.target-index;
+            pick(c, i) => { root.pick(c, i); }
+        }
+        Rectangle {
+            x: lcell.width;
+            y: 0;
+            width: 1px;
+            height: parent.height;
+            background: Theme.border;
+        }
+        rcell := VerseCell {
+            x: lcell.width + 1px;
+            y: 0;
+            width: parent.width - lcell.width - 1px;
+            height: parent.height;
+            verse-row: p.right;
+            column: 1;
+            selected-col: root.selected-col;
+            selected-idx: root.selected-idx;
+            target: i == root.target-index;
+            pick(c, i) => { root.pick(c, i); }
         }
     }
 }
@@ -285,142 +478,104 @@ component GlossPane inherits Rectangle {
 }
 
 // ---------------------------------------------------------------------------
-// The reading area: one column, or two side by side with their scrolling
-// locked together.
-//
-// Both columns are always instantiated and placed by hand instead of being
-// wrapped in `if parallel`, and they are direct children of this component so
-// that each can reach the other by id — Slint scopes ids to the element that
-// encloses them, and hides the ones declared inside a conditional entirely.
+// The reading area: one translation, or two side by side — locked into a
+// single list, or scrolling independently.
 // ---------------------------------------------------------------------------
 component ParallelColumns inherits Rectangle {
     in property <[VerseRow]> rows;
     in property <[VerseRow]> rows2;
+    in property <[PairRow]> pairs;
     in property <bool> parallel;
     in property <bool> scroll-lock;
     in property <string> subtitle;
     in property <string> subtitle2;
     in property <int> selected-col;
     in property <int> selected-idx;
-    /// Bumped by Rust on every navigation; sends both columns back to the top.
     in property <int> nav-epoch;
-    callback pick(int, int);           // (column, word index)
+    in property <int> target-index: -1;
+    callback pick(int, int);
 
-    property <length> head-h: root.parallel ? 30px : 0px;
-    property <length> w1: root.parallel ? (self.width - 1px) / 2 : self.width;
-    property <length> w2: max(0px, self.width - self.w1 - 1px);
-
-    // --- scroll locking ----------------------------------------------------
-    // Both columns hold the same chapter, so mapping "rows scrolled past"
-    // from one to the other keeps the same verse at the top even when the two
-    // texts differ wildly in height (tagged word chips wrap much taller than
-    // prose). A ListView reports viewport-height as rows × the average height
-    // of the rows it has measured, which is exactly the scale we need.
-    //
-    // The sync hangs off `scrolled`, which a ScrollView only emits for real
-    // input — wheel, drag, scrollbar. Watching viewport-y instead would also
-    // catch the ListView re-anchoring itself as it refines its height
-    // estimate, and those corrections would bounce between the columns.
-    property <length> row-h1: root.rows.length > 0 ? col1.viewport-height / root.rows.length : 0px;
-    property <length> row-h2: root.rows2.length > 0 ? col2.viewport-height / root.rows2.length : 0px;
-    // most negative viewport-y each column can take (0px = top)
-    property <length> floor1: min(0px, col1.visible-height - col1.viewport-height);
-    property <length> floor2: min(0px, col2.visible-height - col2.viewport-height);
-    property <bool> lock-active: root.parallel && root.scroll-lock
-        && root.row-h1 > 0px && root.row-h2 > 0px;
-
-    function push-secondary() {
-        col2.viewport-y = max(root.floor2, min(0px, col1.viewport-y * (root.row-h2 / root.row-h1)));
-    }
-
-    function push-primary() {
-        col1.viewport-y = max(root.floor1, min(0px, col2.viewport-y * (root.row-h1 / root.row-h2)));
-    }
-
-    // Re-align when the lock is switched back on, rather than leaving the
-    // columns apart until the next scroll.
-    property <bool> lock-watch: root.scroll-lock;
-    changed lock-watch => {
-        if (root.lock-watch && root.lock-active) {
-            root.push-secondary();
-        }
-    }
-
-    property <int> epoch-watch: root.nav-epoch;
-    changed epoch-watch => {
-        col1.viewport-y = 0px;
-        col2.viewport-y = 0px;
-    }
-
-    // --- layout ------------------------------------------------------------
-    Rectangle {
-        x: 0;
-        y: 0;
-        width: root.w1;
-        height: root.head-h;
-        visible: root.parallel;
-        Text {
-            text: root.subtitle;
-            color: Theme.muted;
-            font-size: 13px;
-            horizontal-alignment: center;
-            vertical-alignment: center;
-        }
-    }
-    col1 := ReadingColumn {
-        x: 0;
-        y: root.head-h;
-        width: root.w1;
-        height: root.height - root.head-h;
-        rows: root.rows;
-        column: 0;
-        selected-col: root.selected-col;
-        selected-idx: root.selected-idx;
-        pick(c, i) => { root.pick(c, i); }
-        scrolled => {
-            if (root.lock-active) {
-                root.push-secondary();
+    VerticalLayout {
+        // Column headings, split on the same 50/50 grid as the text below.
+        // Halves come from equal stretch with zeroed preferred/minimum widths,
+        // never from a `width: parent.width / 2` binding: a fixed width is
+        // part of an element's layout-info, and reading the parent's width
+        // there asks a layout for its output while it is still being solved.
+        if root.parallel: HorizontalLayout {
+            height: 30px;
+            Rectangle {
+                horizontal-stretch: 1;
+                preferred-width: 0px;
+                min-width: 0px;
+                Text {
+                    text: root.subtitle;
+                    color: Theme.muted;
+                    font-size: 13px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+            Rectangle { width: 1px; background: Theme.border; }
+            Rectangle {
+                horizontal-stretch: 1;
+                preferred-width: 0px;
+                min-width: 0px;
+                Text {
+                    text: root.subtitle2;
+                    color: Theme.muted;
+                    font-size: 13px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
             }
         }
-    }
 
-    Rectangle {
-        x: root.w1;
-        y: 0;
-        width: 1px;
-        height: root.height;
-        background: Theme.border;
-        visible: root.parallel;
-    }
-
-    Rectangle {
-        x: root.w1 + 1px;
-        y: 0;
-        width: root.w2;
-        height: root.head-h;
-        visible: root.parallel;
-        Text {
-            text: root.subtitle2;
-            color: Theme.muted;
-            font-size: 13px;
-            horizontal-alignment: center;
-            vertical-alignment: center;
+        if !root.parallel: ReadingColumn {
+            rows: root.rows;
+            column: 0;
+            selected-col: root.selected-col;
+            selected-idx: root.selected-idx;
+            nav-epoch: root.nav-epoch;
+            target-index: root.target-index;
+            pick(c, i) => { root.pick(c, i); }
         }
-    }
-    col2 := ReadingColumn {
-        x: root.w1 + 1px;
-        y: root.head-h;
-        width: root.w2;
-        height: root.height - root.head-h;
-        visible: root.parallel;
-        rows: root.rows2;
-        column: 1;
-        selected-col: root.selected-col;
-        selected-idx: root.selected-idx;
-        pick(c, i) => { root.pick(c, i); }
-        scrolled => {
-            if (root.lock-active) {
-                root.push-primary();
+
+        if root.parallel && root.scroll-lock: PairedColumn {
+            rows: root.pairs;
+            selected-col: root.selected-col;
+            selected-idx: root.selected-idx;
+            nav-epoch: root.nav-epoch;
+            target-index: root.target-index;
+            pick(c, i) => { root.pick(c, i); }
+        }
+
+        // Unlocked: two lists, each minding its own scroll position. Nothing
+        // keeps them in step, which is the point.
+        if root.parallel && !root.scroll-lock: HorizontalLayout {
+            ReadingColumn {
+                horizontal-stretch: 1;
+                preferred-width: 0px;
+                min-width: 0px;
+                rows: root.rows;
+                column: 0;
+                selected-col: root.selected-col;
+                selected-idx: root.selected-idx;
+                nav-epoch: root.nav-epoch;
+                target-index: root.target-index;
+                pick(c, i) => { root.pick(c, i); }
+            }
+            Rectangle { width: 1px; background: Theme.border; }
+            ReadingColumn {
+                horizontal-stretch: 1;
+                preferred-width: 0px;
+                min-width: 0px;
+                rows: root.rows2;
+                column: 1;
+                selected-col: root.selected-col;
+                selected-idx: root.selected-idx;
+                nav-epoch: root.nav-epoch;
+                target-index: root.target-index;
+                pick(c, i) => { root.pick(c, i); }
             }
         }
     }
@@ -440,10 +595,15 @@ export component MainWindow inherits Window {
     // --- data in from Rust ---
     in property <[TranslationItem]> translations;
     in property <[string]> translation-labels;
+    /// Which entry each picker starts on, so a restored session shows the
+    /// text it actually opened.
+    in property <int> primary-index;
+    in property <int> secondary-index;
     in property <[BookItem]> books;
     in property <[int]> chapters;
     in property <[VerseRow]> rows;      // primary column
-    in property <[VerseRow]> rows2;     // secondary column (parallel only)
+    in property <[VerseRow]> rows2;     // secondary column (parallel, unlocked)
+    in property <[PairRow]> pairs;      // both columns as one list (locked)
     in property <[SearchItem]> results;
 
     // reader's edition
@@ -477,8 +637,19 @@ export component MainWindow inherits Window {
     // verse. Rust resets both columns to the top on navigation.
     in-out property <bool> scroll-lock: true;
     /// Bumped by Rust whenever the passage changes, to send both columns back
-    /// to the top of the new chapter.
+    /// to the top of the new chapter — or to `target-index`, the row of a
+    /// search hit, when that is set.
     in property <int> nav-epoch;
+    in property <int> target-index: -1;
+    /// Bumped by Rust for each new search: the results list returns to its top
+    /// for a new query, but keeps its place when coming back from a hit.
+    in property <int> search-epoch;
+    /// Incremented to move keyboard focus into the search box (Ctrl+F).
+    in-out property <int> focus-search;
+    /// The advanced-search panel (Ctrl+Shift+F): the query language's
+    /// reference card, with examples that fill the search box.
+    in-out property <bool> advanced;
+    property <bool> has-results: root.results.length > 0;
 
     // --- callbacks to Rust ---
     callback select-book(int);
@@ -495,414 +666,602 @@ export component MainWindow inherits Window {
     callback word-clicked(int, int);  // (column, word index)
     callback close-word();
     callback toggle-reader();
+    callback toggle-scroll-lock();
+    callback toggle-advanced();
     callback threshold-changed(int);
 
-    VerticalLayout {
-        // ---------------- Top bar ----------------
-        Rectangle {
-            height: 52px;
-            background: Theme.panel;
-            border-width: 0px;
-            HorizontalLayout {
-                padding-left: 14px;
-                padding-right: 14px;
-                spacing: 12px;
-                // Each item is vertically centered so the logo, search box and
-                // buttons share one baseline across the 52px bar.
-                VerticalLayout {
-                    alignment: center;
-                    Text {
-                        text: "✝ Logos";
-                        color: Theme.accent;
-                        font-size: 18px;
-                        font-weight: 700;
-                    }
+    // The std-widgets (combo boxes, the search field) take their colours from
+    // the *system* scheme, not from Theme, so in light mode they would keep
+    // painting light text on our light panel. Keep the two in step.
+    property <bool> dark-watch: Theme.dark;
+    function sync-widget-scheme() {
+        Palette.color-scheme = Theme.dark ? ColorScheme.dark : ColorScheme.light;
+    }
+    changed dark-watch => { root.sync-widget-scheme(); }
+    // Keys reach nothing unless something has focus, so start on the shortcut
+    // scope; the search box, when focused, is inside it, and the scope sees
+    // keys in the capture phase before the box does.
+    init => {
+        root.sync-widget-scheme();
+        shortcuts.focus();
+    }
+
+    shortcuts := FocusScope {
+        capture-key-pressed(event) => {
+            if (event.modifiers.control && (event.text == "f" || event.text == "F")) {
+                if (event.modifiers.shift) {
+                    root.toggle-advanced();
+                } else {
+                    root.focus-search += 1;
                 }
-                // command / search box
-                Rectangle {
-                    horizontal-stretch: 1;
+                return accept;
+            }
+            reject
+        }
+
+        VerticalLayout {
+            // ---------------- Top bar ----------------
+            Rectangle {
+                height: 52px;
+                background: Theme.panel;
+                border-width: 0px;
+                HorizontalLayout {
+                    padding-left: 14px;
+                    padding-right: 14px;
+                    spacing: 12px;
+                    // Each item is vertically centered so the logo, search box and
+                    // buttons share one baseline across the 52px bar.
                     VerticalLayout {
                         alignment: center;
-                        cmd := LineEdit {
-                            placeholder-text: "Go to reference (John 3:16) or search…";
-                            text <=> root.command;
-                            accepted(t) => { root.go(t); }
-                        }
-                    }
-                }
-                VerticalLayout {
-                    alignment: center;
-                    Pill {
-                        label: root.parallel ? "Parallel ✓" : "Parallel";
-                        active: root.parallel;
-                        clicked => { root.toggle-parallel(); }
-                    }
-                }
-                if root.reader-available: VerticalLayout {
-                    alignment: center;
-                    Pill {
-                        label: root.reader ? "📖 Reader ✓" : "📖 Reader";
-                        active: root.reader;
-                        clicked => { root.toggle-reader(); }
-                    }
-                }
-                if root.parallel: VerticalLayout {
-                    alignment: center;
-                    Pill {
-                        label: root.scroll-lock ? "🔗 Linked" : "⛓ Unlinked";
-                        active: root.scroll-lock;
-                        clicked => { root.scroll-lock = !root.scroll-lock; }
-                    }
-                }
-                VerticalLayout {
-                    alignment: center;
-                    Pill {
-                        label: Theme.dark ? "☀ Light" : "🌙 Dark";
-                        clicked => { root.toggle-theme(); }
-                    }
-                }
-            }
-        }
-        Rectangle { height: 1px; background: Theme.border; }
-
-        // ---------------- Body ----------------
-        HorizontalLayout {
-            // -------- Sidebar --------
-            Rectangle {
-                width: 270px;
-                background: Theme.panel;
-                VerticalLayout {
-                    padding: 10px;
-                    spacing: 8px;
-
-                    // translation pickers
-                    Text { text: "Primary translation"; color: Theme.muted; font-size: 11px; }
-                    ComboBox {
-                        model: root.translation-labels;
-                        current-index: 0;
-                        selected(v) => { root.primary-changed(self.current-index); }
-                    }
-                    if root.parallel: Text { text: "Secondary translation"; color: Theme.muted; font-size: 11px; }
-                    if root.parallel: ComboBox {
-                        model: root.translation-labels;
-                        current-index: 1;
-                        selected(v) => { root.secondary-changed(self.current-index); }
-                    }
-
-                    if root.reader && root.reader-available: Text {
-                        text: "Gloss words rarer than";
-                        color: Theme.muted;
-                        font-size: 11px;
-                    }
-                    if root.reader && root.reader-available: ComboBox {
-                        model: root.threshold-labels;
-                        current-index: root.threshold-index;
-                        selected(v) => { root.threshold-changed(self.current-index); }
-                    }
-
-                    Rectangle { height: 1px; background: Theme.border; }
-
-                    // book list
-                    Text { text: "Books"; color: Theme.muted; font-size: 11px; }
-                    ListView {
-                        vertical-stretch: 1;
-                        for b[i] in root.books: Rectangle {
-                            height: b.header ? 30px : 26px;
-                            background: (!b.header && b.nr == root.current-book)
-                                ? Theme.accent-bg
-                                : (btouch.has-hover && !b.header ? Theme.panel-alt : transparent);
-                            border-radius: 5px;
-                            HorizontalLayout {
-                                padding-left: b.header ? 4px : 12px;
-                                Text {
-                                    text: b.name;
-                                    vertical-alignment: center;
-                                    font-size: b.header ? 11px : 14px;
-                                    font-weight: b.header ? 700 : 400;
-                                    color: b.header
-                                        ? Theme.muted
-                                        : (b.nr == root.current-book ? Theme.accent : Theme.text);
-                                }
-                            }
-                            btouch := TouchArea {
-                                enabled: !b.header;
-                                clicked => { root.select-book(b.nr); }
-                            }
-                        }
-                    }
-
-                    // chapter grid
-                    Text {
-                        text: "Chapters";
-                        color: Theme.muted;
-                        font-size: 11px;
-                        visible: root.chapters.length > 0;
-                    }
-                    // Sizes to fit all chapters; caps and scrolls only when the
-                    // grid would get too tall (e.g. Psalms' 150 chapters).
-                    // viewport-height must be set explicitly: the cells are
-                    // absolutely positioned, so the ScrollView can't infer it.
-                    csv := ScrollView {
-                        property <int> cols: 7;
-                        property <length> cell: 34px;
-                        property <length> content-h: Math.ceil(root.chapters.length / self.cols) * self.cell;
-                        visible: root.chapters.length > 0;
-                        viewport-width: self.cols * self.cell;
-                        viewport-height: self.content-h;
-                        height: Math.min(self.content-h + 2px, 300px);
-                        for ch[i] in root.chapters: Rectangle {
-                            x: Math.mod(i, csv.cols) * csv.cell;
-                            y: Math.floor(i / csv.cols) * csv.cell;
-                            width: csv.cell - 4px;
-                            height: csv.cell - 4px;
-                            border-radius: 5px;
-                            border-width: 1px;
-                            border-color: ch == root.current-chapter ? Theme.accent : Theme.border;
-                            background: ch == root.current-chapter
-                                ? Theme.accent-bg
-                                : (chtouch.has-hover ? Theme.panel-alt : transparent);
-                            Text {
-                                text: ch;
-                                font-size: 12px;
-                                color: ch == root.current-chapter ? Theme.accent : Theme.text;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
-                            chtouch := TouchArea { clicked => { root.select-chapter(ch); } }
-                        }
-                    }
-                }
-            }
-            Rectangle { width: 1px; background: Theme.border; }
-
-            // -------- Reading / results area --------
-            Rectangle {
-                horizontal-stretch: 1;
-                background: Theme.bg;
-
-                // ----- Search results -----
-                if root.show-results: VerticalLayout {
-                    padding: 16px;
-                    spacing: 8px;
-                    HorizontalLayout {
-                        spacing: 10px;
                         Text {
-                            text: root.results-summary;
-                            color: Theme.text;
-                            font-size: 16px;
-                            font-weight: 700;
-                            vertical-alignment: center;
-                            horizontal-stretch: 1;
-                        }
-                        Pill { label: "✕ Close"; clicked => { root.close-results(); } }
-                    }
-                    ListView {
-                        vertical-stretch: 1;
-                        for r[i] in root.results: Rectangle {
-                            height: rlayout.preferred-height;
-                            background: rtouch.has-hover ? Theme.panel : transparent;
-                            border-radius: 6px;
-                            rlayout := VerticalLayout {
-                                padding: 8px;
-                                spacing: 2px;
-                                Text {
-                                    text: r.label;
-                                    color: Theme.accent;
-                                    font-size: 13px;
-                                    font-weight: 700;
-                                }
-                                Text {
-                                    text: r.snippet;
-                                    color: Theme.text;
-                                    font-size: 14px;
-                                    wrap: word-wrap;
-                                }
-                            }
-                            rtouch := TouchArea { clicked => { root.open-result(i); } }
-                        }
-                    }
-                }
-
-                // ----- Reading view -----
-                if !root.show-results: VerticalLayout {
-                    // chapter header with prev/next
-                    Rectangle {
-                        height: 44px;
-                        HorizontalLayout {
-                            padding-left: 16px;
-                            padding-right: 16px;
-                            spacing: 10px;
-                            Pill { label: "‹ Prev"; clicked => { root.prev-chapter(); } }
-                            Text {
-                                text: root.primary-title;
-                                color: Theme.text;
-                                font-size: 17px;
-                                font-weight: 700;
-                                vertical-alignment: center;
-                                horizontal-stretch: 1;
-                                horizontal-alignment: center;
-                            }
-                            Pill { label: "Next ›"; clicked => { root.next-chapter(); } }
-                        }
-                    }
-                    Rectangle { height: 1px; background: Theme.border; }
-
-                    ParallelColumns {
-                        vertical-stretch: 1;
-                        rows: root.rows;
-                        rows2: root.rows2;
-                        parallel: root.parallel;
-                        scroll-lock: root.scroll-lock;
-                        subtitle: root.primary-subtitle;
-                        subtitle2: root.secondary-title;
-                        selected-col: root.selected-col;
-                        selected-idx: root.selected-idx;
-                        nav-epoch: root.nav-epoch;
-                        pick(c, i) => { root.word-clicked(c, i); }
-                    }
-
-                    if root.reader && root.reader-available: Rectangle {
-                        height: 1px;
-                        background: Theme.border;
-                    }
-                    if root.reader && root.reader-available: GlossPane {
-                        height: min(260px, parent.height * 40%);
-                        notes: root.notes;
-                        caption: root.reader-caption;
-                    }
-                }
-            }
-
-            // -------- Word-study panel --------
-            if root.show-word: Rectangle { width: 1px; background: Theme.border; }
-            if root.show-word: Rectangle {
-                width: 340px;
-                background: Theme.panel;
-                VerticalLayout {
-                    padding: 16px;
-                    spacing: 10px;
-                    HorizontalLayout {
-                        Text {
-                            text: "Word study";
-                            color: Theme.muted;
-                            font-size: 12px;
-                            font-weight: 700;
-                            vertical-alignment: center;
-                            horizontal-stretch: 1;
-                        }
-                        Pill { label: "✕"; clicked => { root.close-word(); } }
-                    }
-                    Text {
-                        text: root.word.surface;
-                        color: Theme.text;
-                        font-size: 30px;
-                        horizontal-alignment: root.word.rtl ? right : left;
-                    }
-                    if root.word.translit != "": Text {
-                        text: root.word.translit;
-                        color: Theme.muted;
-                        font-size: 15px;
-                    }
-                    if root.word.strongs != "": HorizontalLayout {
-                        spacing: 8px;
-                        Rectangle {
-                            background: Theme.accent-bg;
-                            border-radius: 5px;
-                            height: 22px;
-                            horizontal-stretch: 0;
-                            HorizontalLayout {
-                                padding-left: 8px;
-                                padding-right: 8px;
-                                Text {
-                                    text: root.word.strongs;
-                                    color: Theme.accent;
-                                    font-size: 13px;
-                                    font-weight: 700;
-                                    vertical-alignment: center;
-                                }
-                            }
-                        }
-                        Text {
-                            text: root.word.lemma;
-                            color: Theme.text;
-                            font-size: 18px;
-                            vertical-alignment: center;
-                        }
-                    }
-                    if root.word.parsing != "": Text {
-                        text: root.word.parsing;
-                        color: Theme.accent;
-                        font-size: 14px;
-                        wrap: word-wrap;
-                    }
-                    // matching original-language word(s) — reverse interlinear
-                    if root.word.originals-label != "": Text {
-                        text: root.word.originals-label;
-                        color: Theme.muted;
-                        font-size: 11px;
-                        font-weight: 700;
-                    }
-                    for o in root.word.originals: HorizontalLayout {
-                        spacing: 10px;
-                        Text {
-                            text: o.text;
+                            text: "✝ Logos";
                             color: Theme.accent;
-                            font-size: 22px;
+                            font-size: 18px;
+                            font-weight: 700;
                         }
+                    }
+                    // command / search box
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        property <int> focus-watch: root.focus-search;
+                        changed focus-watch => { cmd.focus(); cmd.select-all(); }
+                        VerticalLayout {
+                            alignment: center;
+                            cmd := LineEdit {
+                                placeholder-text: "Go to reference (John 3:16), search, or query — Ctrl+Shift+F for the language";
+                                text <=> root.command;
+                                accepted(t) => { root.go(t); }
+                            }
+                        }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        Pill {
+                            label: root.advanced ? "⌕ Advanced ✓" : "⌕ Advanced";
+                            active: root.advanced;
+                            clicked => { root.toggle-advanced(); }
+                        }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        Pill {
+                            label: root.parallel ? "Parallel ✓" : "Parallel";
+                            active: root.parallel;
+                            clicked => { root.toggle-parallel(); }
+                        }
+                    }
+                    if root.reader-available: VerticalLayout {
+                        alignment: center;
+                        Pill {
+                            label: root.reader ? "📖 Reader ✓" : "📖 Reader";
+                            active: root.reader;
+                            clicked => { root.toggle-reader(); }
+                        }
+                    }
+                    if root.parallel: VerticalLayout {
+                        alignment: center;
+                        Pill {
+                            label: root.scroll-lock ? "🔗 Linked" : "⛓ Unlinked";
+                            active: root.scroll-lock;
+                            clicked => { root.toggle-scroll-lock(); }
+                        }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        Pill {
+                            label: Theme.dark ? "☀ Light" : "🌙 Dark";
+                            clicked => { root.toggle-theme(); }
+                        }
+                    }
+                }
+            }
+            Rectangle { height: 1px; background: Theme.border; }
+
+            // ---------------- Advanced search: the language, on a card ----------------
+            if root.advanced: Rectangle {
+                background: Theme.panel-alt;
+                VerticalLayout {
+                    padding: 12px;
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    spacing: 8px;
+                    HorizontalLayout {
+                        spacing: 10px;
                         Text {
-                            text: o.parsing;
-                            color: Theme.muted;
-                            font-size: 12px;
+                            text: "Advanced search — type a query in the box above and press Enter. It runs on the Hebrew OT / Greek NT; hits are shown in the translation you are reading, with the matching words marked.";
+                            color: Theme.text;
+                            font-size: 13px;
                             vertical-alignment: center;
                             wrap: word-wrap;
                             horizontal-stretch: 1;
                         }
+                        Pill { label: "✕"; clicked => { root.toggle-advanced(); } }
                     }
-                    if root.word.gloss != "": Text {
-                        text: root.word.gloss;
-                        color: Theme.text;
-                        font-size: 15px;
-                        font-weight: 600;
-                        wrap: word-wrap;
-                    }
-                    Rectangle { height: 1px; background: Theme.border; }
-                    ScrollView {
-                        vertical-stretch: 1;
+                    HorizontalLayout {
+                        spacing: 28px;
                         VerticalLayout {
-                            width: 100%;
-                            spacing: 8px;
+                            spacing: 3px;
+                            horizontal-stretch: 1;
+                            preferred-width: 0px;
+                            min-width: 0px;
+                            alignment: start;
+                            Text { text: "ONE WORD"; color: Theme.muted; font-size: 10px; font-weight: 700; }
+                            HorizontalLayout { spacing: 10px;
+                                Text { text: "G25   H430"; width: 140px; color: Theme.accent; font-size: 11px; font-weight: 600; }
+                                Text { text: "Strong's number"; color: Theme.text; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; min-width: 0px; }
+                            }
+                            HorizontalLayout { spacing: 10px;
+                                Text { text: "lemma:ἀγαπάω"; width: 140px; color: Theme.accent; font-size: 11px; font-weight: 600; }
+                                Text { text: "dictionary form (accents optional)"; color: Theme.text; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; min-width: 0px; }
+                            }
+                            HorizontalLayout { spacing: 10px;
+                                Text { text: "gloss:love"; width: 140px; color: Theme.accent; font-size: 11px; font-weight: 600; }
+                                Text { text: "lexemes whose gloss says it"; color: Theme.text; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; min-width: 0px; }
+                            }
+                            HorizontalLayout { spacing: 10px;
+                                Text { text: "θεο*   “ὁ θεός”"; width: 140px; color: Theme.accent; font-size: 11px; font-weight: 600; }
+                                Text { text: "surface prefix · exact phrase"; color: Theme.text; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; min-width: 0px; }
+                            }
+                            HorizontalLayout { spacing: 10px;
+                                Text { text: "[G25 aorist active]"; width: 140px; color: Theme.accent; font-size: 11px; font-weight: 600; }
+                                Text { text: "several constraints on the SAME word"; color: Theme.text; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; min-width: 0px; }
+                            }
+                        }
+                        VerticalLayout {
+                            spacing: 3px;
+                            horizontal-stretch: 1;
+                            preferred-width: 0px;
+                            min-width: 0px;
+                            alignment: start;
+                            Text { text: "MORPHOLOGY — field:value, or just the value"; color: Theme.muted; font-size: 10px; font-weight: 700; }
+                            HorizontalLayout { spacing: 10px;
+                                Text { text: "pos:"; width: 140px; color: Theme.accent; font-size: 11px; font-weight: 600; }
+                                Text { text: "verb noun adjective article pronoun preposition conjunction adverb particle name"; color: Theme.text; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; min-width: 0px; }
+                            }
+                            HorizontalLayout { spacing: 10px;
+                                Text { text: "tense:"; width: 140px; color: Theme.accent; font-size: 11px; font-weight: 600; }
+                                Text { text: "present imperfect future aorist perfect pluperfect · wayyiqtol weqatal cohortative jussive"; color: Theme.text; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; min-width: 0px; }
+                            }
+                            HorizontalLayout { spacing: 10px;
+                                Text { text: "voice: mood: case:"; width: 140px; color: Theme.accent; font-size: 11px; font-weight: 600; }
+                                Text { text: "active middle passive · indicative imperative subjunctive optative infinitive participle · nominative genitive dative accusative vocative"; color: Theme.text; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; min-width: 0px; }
+                            }
+                            HorizontalLayout { spacing: 10px;
+                                Text { text: "number: gender: person:"; width: 140px; color: Theme.accent; font-size: 11px; font-weight: 600; }
+                                Text { text: "singular plural dual · masculine feminine neuter · 1 2 3"; color: Theme.text; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; min-width: 0px; }
+                            }
+                            HorizontalLayout { spacing: 10px;
+                                Text { text: "stem: state:"; width: 140px; color: Theme.accent; font-size: 11px; font-weight: 600; }
+                                Text { text: "qal niphal piel hiphil hophal hithpael … · absolute construct · alternate with |: tense:aorist|perfect"; color: Theme.text; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; min-width: 0px; }
+                            }
+                        }
+                        VerticalLayout {
+                            spacing: 3px;
+                            horizontal-stretch: 1;
+                            preferred-width: 0px;
+                            min-width: 0px;
+                            alignment: start;
+                            Text { text: "COMBINING"; color: Theme.muted; font-size: 10px; font-weight: 700; }
+                            HorizontalLayout { spacing: 10px;
+                                Text { text: "A B · A AND B"; width: 140px; color: Theme.accent; font-size: 11px; font-weight: 600; }
+                                Text { text: "both in the verse"; color: Theme.text; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; min-width: 0px; }
+                            }
+                            HorizontalLayout { spacing: 10px;
+                                Text { text: "A OR B · NOT A · ( )"; width: 140px; color: Theme.accent; font-size: 11px; font-weight: 600; }
+                                Text { text: "either · exclude · group"; color: Theme.text; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; min-width: 0px; }
+                            }
+                            HorizontalLayout { spacing: 10px;
+                                Text { text: "A BEFORE/2 B"; width: 140px; color: Theme.accent; font-size: 11px; font-weight: 600; }
+                                Text { text: "A within two words before B · AFTER/n · NEAR/n either side · no /n = anywhere in the verse"; color: Theme.text; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; min-width: 0px; }
+                            }
+                            Text { text: "TRY"; color: Theme.muted; font-size: 10px; font-weight: 700; }
+                            VerticalLayout {
+                                spacing: 4px;
+                                alignment: start;
+                                Pill { label: "[G25 aorist]"; clicked => { root.command = "[G25 aorist]"; root.focus-search += 1; } }
+                                Pill { label: "[verb aorist] BEFORE/1 lemma:θεός"; clicked => { root.command = "[verb aorist] BEFORE/1 lemma:θεός"; root.focus-search += 1; } }
+                                Pill { label: "[H430 plural] NEAR/2 [verb hiphil]"; clicked => { root.command = "[H430 plural] NEAR/2 [verb hiphil]"; root.focus-search += 1; } }
+                            }
+                        }
+                    }
+                }
+            }
+            if root.advanced: Rectangle { height: 1px; background: Theme.border; }
+
+            // ---------------- Body ----------------
+            HorizontalLayout {
+                // -------- Sidebar --------
+                Rectangle {
+                    width: 270px;
+                    background: Theme.panel;
+                    VerticalLayout {
+                        padding: 10px;
+                        spacing: 8px;
+
+                        // translation pickers
+                        Text { text: "Primary translation"; color: Theme.muted; font-size: 11px; }
+                        ComboBox {
+                            model: root.translation-labels;
+                            current-index: root.primary-index;
+                            selected(v) => { root.primary-changed(self.current-index); }
+                        }
+                        if root.parallel: Text { text: "Secondary translation"; color: Theme.muted; font-size: 11px; }
+                        if root.parallel: ComboBox {
+                            model: root.translation-labels;
+                            current-index: root.secondary-index;
+                            selected(v) => { root.secondary-changed(self.current-index); }
+                        }
+
+                        if root.reader && root.reader-available: Text {
+                            text: "Gloss words rarer than";
+                            color: Theme.muted;
+                            font-size: 11px;
+                        }
+                        if root.reader && root.reader-available: ComboBox {
+                            model: root.threshold-labels;
+                            current-index: root.threshold-index;
+                            selected(v) => { root.threshold-changed(self.current-index); }
+                        }
+
+                        Rectangle { height: 1px; background: Theme.border; }
+
+                        // book list
+                        Text { text: "Books"; color: Theme.muted; font-size: 11px; }
+                        ListView {
+                            vertical-stretch: 1;
+                            for b[i] in root.books: Rectangle {
+                                height: b.header ? 30px : 26px;
+                                background: (!b.header && b.nr == root.current-book)
+                                    ? Theme.accent-bg
+                                    : (btouch.has-hover && !b.header ? Theme.panel-alt : transparent);
+                                border-radius: 5px;
+                                HorizontalLayout {
+                                    padding-left: b.header ? 4px : 12px;
+                                    Text {
+                                        text: b.name;
+                                        vertical-alignment: center;
+                                        font-size: b.header ? 11px : 14px;
+                                        font-weight: b.header ? 700 : 400;
+                                        color: b.header
+                                            ? Theme.muted
+                                            : (b.nr == root.current-book ? Theme.accent : Theme.text);
+                                    }
+                                }
+                                btouch := TouchArea {
+                                    enabled: !b.header;
+                                    clicked => { root.select-book(b.nr); }
+                                }
+                            }
+                        }
+
+                        // chapter grid
+                        Text {
+                            text: "Chapters";
+                            color: Theme.muted;
+                            font-size: 11px;
+                            visible: root.chapters.length > 0;
+                        }
+                        // Sizes to fit all chapters; caps and scrolls only when the
+                        // grid would get too tall (e.g. Psalms' 150 chapters).
+                        // viewport-height must be set explicitly: the cells are
+                        // absolutely positioned, so the ScrollView can't infer it.
+                        csv := ScrollView {
+                            property <int> cols: 7;
+                            property <length> cell: 34px;
+                            property <length> content-h: Math.ceil(root.chapters.length / self.cols) * self.cell;
+                            visible: root.chapters.length > 0;
+                            viewport-width: self.cols * self.cell;
+                            viewport-height: self.content-h;
+                            height: Math.min(self.content-h + 2px, 300px);
+                            for ch[i] in root.chapters: Rectangle {
+                                x: Math.mod(i, csv.cols) * csv.cell;
+                                y: Math.floor(i / csv.cols) * csv.cell;
+                                width: csv.cell - 4px;
+                                height: csv.cell - 4px;
+                                border-radius: 5px;
+                                border-width: 1px;
+                                border-color: ch == root.current-chapter ? Theme.accent : Theme.border;
+                                background: ch == root.current-chapter
+                                    ? Theme.accent-bg
+                                    : (chtouch.has-hover ? Theme.panel-alt : transparent);
+                                Text {
+                                    text: ch;
+                                    font-size: 12px;
+                                    color: ch == root.current-chapter ? Theme.accent : Theme.text;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                chtouch := TouchArea { clicked => { root.select-chapter(ch); } }
+                            }
+                        }
+                    }
+                }
+                Rectangle { width: 1px; background: Theme.border; }
+
+                // -------- Reading / results area --------
+                Rectangle {
+                    horizontal-stretch: 1;
+                    background: Theme.bg;
+
+                    // Both views stay instantiated and only switch visibility.
+                    // An `if` would tear them down: the results list would
+                    // forget its scroll position every time a hit is opened,
+                    // and the reading view would be recreated *after* the
+                    // navigation epoch bumped, so it would never land on the
+                    // hit's verse.
+
+                    // ----- Search results -----
+                    VerticalLayout {
+                        visible: root.show-results;
+                        padding: 16px;
+                        spacing: 8px;
+                        HorizontalLayout {
+                            spacing: 10px;
                             Text {
-                                width: 100%;
-                                text: root.word.definition;
-                                color: Theme.muted;
-                                font-size: 14px;
-                                wrap: word-wrap;
-                            }
-                            if root.word.show-lxx: Text {
-                                text: "Septuagint (LXX)";
-                                color: Theme.muted;
-                                font-size: 11px;
-                                font-weight: 700;
-                            }
-                            if root.word.show-lxx: Text {
-                                width: 100%;
-                                text: root.word.lxx;
+                                text: root.results-summary;
                                 color: Theme.text;
                                 font-size: 16px;
-                                wrap: word-wrap;
-                            }
-                            if root.word.show-vulgate: Text {
-                                text: "Vulgate (Latin)";
-                                color: Theme.muted;
-                                font-size: 11px;
                                 font-weight: 700;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
                             }
-                            if root.word.show-vulgate: Text {
-                                width: 100%;
-                                text: root.word.vulgate;
+                            Pill { label: "✕ Close"; clicked => { root.close-results(); } }
+                        }
+                        ListView {
+                            vertical-stretch: 1;
+                            preferred-height: 0px;   // see VerseScroller: no % preferred
+                            // back to the top for a new search only; coming
+                            // back from a hit keeps the place
+                            property <int> search-watch: root.search-epoch;
+                            changed search-watch => { self.viewport-y = 0px; }
+                            for r[i] in root.results: Rectangle {
+                                height: rlayout.preferred-height;
+                                background: rtouch.has-hover ? Theme.panel : transparent;
+                                border-radius: 6px;
+                                rlayout := VerticalLayout {
+                                    padding: 8px;
+                                    spacing: 2px;
+                                    Text {
+                                        text: r.label;
+                                        color: Theme.accent;
+                                        font-size: 13px;
+                                        font-weight: 700;
+                                    }
+                                    for line in r.lines: HorizontalLayout {
+                                        spacing: 3px;
+                                        alignment: r.rtl ? end : start;
+                                        for w in line.words: Rectangle {
+                                            border-radius: 3px;
+                                            background: w.hit ? Theme.accent-bg : transparent;
+                                            HorizontalLayout {
+                                                padding-left: 3px;
+                                                padding-right: 3px;
+                                                Text {
+                                                    text: w.text;
+                                                    color: w.hit ? Theme.accent : Theme.text;
+                                                    font-size: 14px;
+                                                    font-weight: w.hit ? 700 : 400;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                rtouch := TouchArea { clicked => { root.open-result(i); } }
+                            }
+                        }
+                    }
+
+                    // ----- Reading view -----
+                    VerticalLayout {
+                        visible: !root.show-results;
+                        // chapter header with prev/next
+                        Rectangle {
+                            height: 44px;
+                            HorizontalLayout {
+                                padding-left: 16px;
+                                padding-right: 16px;
+                                spacing: 10px;
+                                if root.has-results: Pill {
+                                    label: "☰ Results";
+                                    active: true;
+                                    clicked => { root.show-results = true; }
+                                }
+                                Pill { label: "‹ Prev"; clicked => { root.prev-chapter(); } }
+                                Text {
+                                    text: root.primary-title;
+                                    color: Theme.text;
+                                    font-size: 17px;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    horizontal-alignment: center;
+                                }
+                                Pill { label: "Next ›"; clicked => { root.next-chapter(); } }
+                            }
+                        }
+                        Rectangle { height: 1px; background: Theme.border; }
+
+                        ParallelColumns {
+                            vertical-stretch: 1;
+                            rows: root.rows;
+                            rows2: root.rows2;
+                            pairs: root.pairs;
+                            parallel: root.parallel;
+                            scroll-lock: root.scroll-lock;
+                            subtitle: root.primary-subtitle;
+                            subtitle2: root.secondary-title;
+                            selected-col: root.selected-col;
+                            selected-idx: root.selected-idx;
+                            nav-epoch: root.nav-epoch;
+                            target-index: root.target-index;
+                            pick(c, i) => { root.word-clicked(c, i); }
+                        }
+
+                        if root.reader && root.reader-available: Rectangle {
+                            height: 1px;
+                            background: Theme.border;
+                        }
+                        if root.reader && root.reader-available: GlossPane {
+                            // fixed, not a share of the parent: as a layout child, reading the
+                            // parent's height here is a binding loop with the window's preferred size
+                            height: 240px;
+                            notes: root.notes;
+                            caption: root.reader-caption;
+                        }
+                    }
+                }
+
+                // -------- Word-study panel --------
+                if root.show-word: Rectangle { width: 1px; background: Theme.border; }
+                if root.show-word: Rectangle {
+                    width: 340px;
+                    background: Theme.panel;
+                    VerticalLayout {
+                        padding: 16px;
+                        spacing: 10px;
+                        HorizontalLayout {
+                            Text {
+                                text: "Word study";
+                                color: Theme.muted;
+                                font-size: 12px;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+                            Pill { label: "✕"; clicked => { root.close-word(); } }
+                        }
+                        Text {
+                            text: root.word.surface;
+                            color: Theme.text;
+                            font-size: 30px;
+                            horizontal-alignment: root.word.rtl ? right : left;
+                        }
+                        if root.word.translit != "": Text {
+                            text: root.word.translit;
+                            color: Theme.muted;
+                            font-size: 15px;
+                        }
+                        if root.word.strongs != "": HorizontalLayout {
+                            spacing: 8px;
+                            Rectangle {
+                                background: Theme.accent-bg;
+                                border-radius: 5px;
+                                height: 22px;
+                                horizontal-stretch: 0;
+                                HorizontalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    Text {
+                                        text: root.word.strongs;
+                                        color: Theme.accent;
+                                        font-size: 13px;
+                                        font-weight: 700;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                            Text {
+                                text: root.word.lemma;
                                 color: Theme.text;
-                                font-size: 15px;
+                                font-size: 18px;
+                                vertical-alignment: center;
+                            }
+                        }
+                        if root.word.parsing != "": Text {
+                            text: root.word.parsing;
+                            color: Theme.accent;
+                            font-size: 14px;
+                            wrap: word-wrap;
+                        }
+                        // matching original-language word(s) — reverse interlinear
+                        if root.word.originals-label != "": Text {
+                            text: root.word.originals-label;
+                            color: Theme.muted;
+                            font-size: 11px;
+                            font-weight: 700;
+                        }
+                        for o in root.word.originals: HorizontalLayout {
+                            spacing: 10px;
+                            Text {
+                                text: o.text;
+                                color: Theme.accent;
+                                font-size: 22px;
+                            }
+                            Text {
+                                text: o.parsing;
+                                color: Theme.muted;
+                                font-size: 12px;
+                                vertical-alignment: center;
                                 wrap: word-wrap;
+                                horizontal-stretch: 1;
+                            }
+                        }
+                        if root.word.gloss != "": Text {
+                            text: root.word.gloss;
+                            color: Theme.text;
+                            font-size: 15px;
+                            font-weight: 600;
+                            wrap: word-wrap;
+                        }
+                        Rectangle { height: 1px; background: Theme.border; }
+                        ScrollView {
+                            vertical-stretch: 1;
+                            VerticalLayout {
+                                width: 100%;
+                                spacing: 8px;
+                                Text {
+                                    width: 100%;
+                                    text: root.word.definition;
+                                    color: Theme.muted;
+                                    font-size: 14px;
+                                    wrap: word-wrap;
+                                }
+                                if root.word.show-lxx: Text {
+                                    text: "Septuagint (LXX)";
+                                    color: Theme.muted;
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                }
+                                if root.word.show-lxx: Text {
+                                    width: 100%;
+                                    text: root.word.lxx;
+                                    color: Theme.text;
+                                    font-size: 16px;
+                                    wrap: word-wrap;
+                                }
+                                if root.word.show-vulgate: Text {
+                                    text: "Vulgate (Latin)";
+                                    color: Theme.muted;
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                }
+                                if root.word.show-vulgate: Text {
+                                    width: 100%;
+                                    text: root.word.vulgate;
+                                    color: Theme.text;
+                                    font-size: 15px;
+                                    wrap: word-wrap;
+                                }
                             }
                         }
                     }

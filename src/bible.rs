@@ -49,13 +49,19 @@ pub struct Verse {
     pub text: String,
 }
 
+/// Markers around a matched word in a search snippet. Private-use code
+/// points: they can never occur in the text itself — unlike «…», which is
+/// how Bokmål (and French) punctuate quotations.
+pub const HIT_OPEN: char = '\u{E000}';
+pub const HIT_CLOSE: char = '\u{E001}';
+
 #[derive(Clone, Debug)]
 pub struct SearchHit {
     pub book: i64,
     pub book_name: String,
     pub chapter: i64,
     pub verse: i64,
-    /// Verse text with matched terms wrapped in `«…»`.
+    /// Verse text with matched terms wrapped in [`HIT_OPEN`]…[`HIT_CLOSE`].
     pub snippet: String,
 }
 
@@ -231,6 +237,41 @@ impl Bible {
             .optional()
     }
 
+    /// Every word of a translation in canonical order, as raw rows for
+    /// `search::Corpus::build`. Whole-corpus, read once and kept in memory:
+    /// the advanced search evaluates against it directly.
+    pub fn corpus_words(&self, translation_id: i64) -> rusqlite::Result<Vec<crate::search::RawWord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT w.book, w.chapter, w.verse, w.text,
+                    COALESCE(NULLIF(w.lemma,''), l.lemma, ''), COALESCE(w.strongs,''), COALESCE(w.morph,'')
+             FROM words w LEFT JOIN lexicon l ON l.strongs = w.strongs
+             WHERE w.translation_id = ?1
+             ORDER BY w.book, w.chapter, w.verse, w.position",
+        )?;
+        let rows = stmt.query_map([translation_id], |r| {
+            Ok(crate::search::RawWord {
+                book: r.get(0)?,
+                chapter: r.get(1)?,
+                verse: r.get(2)?,
+                text: r.get(3)?,
+                lemma: r.get(4)?,
+                strongs: r.get(5)?,
+                morph: r.get(6)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// The whole lexicon as (Strong's, headword, gloss + definition), for
+    /// resolving `lemma:` and `gloss:` queries to Strong's numbers.
+    pub fn lexicon_rows(&self) -> rusqlite::Result<Vec<(String, String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT strongs, COALESCE(lemma,''), COALESCE(gloss,'') || ' ' || COALESCE(definition,'') FROM lexicon",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        rows.collect()
+    }
+
     /// How often each lexeme (Strong's number) occurs in a whole translation.
     ///
     /// This is what a reader's edition is built on: a word is glossed in the
@@ -249,7 +290,9 @@ impl Bible {
         rows.collect()
     }
 
-    /// Full-text search within one translation. Returns ranked verse snippets.
+    /// Full-text search within one translation, in canonical order — book,
+    /// chapter, verse — so hits read down the page the way the Bible does.
+    /// (FTS5's relevance `rank` is what made results look shuffled.)
     pub fn search(
         &self,
         translation_id: i64,
@@ -262,12 +305,12 @@ impl Bible {
         }
         let mut stmt = self.conn.prepare(
             "SELECT v.book, b.name, v.chapter, v.verse,
-                    snippet(verses_fts, 0, '«', '»', '…', 16) AS snip
+                    snippet(verses_fts, 0, char(57344), char(57345), '…', 16) AS snip
              FROM verses_fts
              JOIN verses v ON v.id = verses_fts.rowid
              JOIN books b ON b.translation_id = v.translation_id AND b.nr = v.book
              WHERE verses_fts MATCH ?1 AND v.translation_id = ?2
-             ORDER BY rank
+             ORDER BY v.book, v.chapter, v.verse
              LIMIT ?3",
         )?;
         let rows = stmt.query_map(rusqlite::params![match_expr, translation_id, limit], |r| {
