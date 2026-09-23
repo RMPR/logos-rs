@@ -36,6 +36,16 @@ OSIS_NR = {
 
 WS = re.compile(r"\s+")
 
+# Elements that end a line or paragraph. Publishers mark poetry with one block
+# per line and no whitespace between them (BFC: <div class="osis_l">…,</div>
+# <div class="osis_l">…), so the text on either side would otherwise fuse —
+# "Dieu,la voûte". A block boundary is always a word boundary in a Bible, and
+# clean() collapses any doubled spaces afterwards.
+BLOCK = {
+    "p", "div", "br", "li", "ul", "ol", "tr", "td", "th", "table", "blockquote",
+    "section", "article", "hr", "h1", "h2", "h3", "h4", "h5", "h6",
+}
+
 
 def clean(text):
     return WS.sub(" ", text).strip()
@@ -49,6 +59,17 @@ def classes(tag):
 def add(verses, key, s):
     if key is not None and key[1] and key[2]:
         verses[key] = verses.get(key, "") + s
+
+
+def descend(verses, key, tag, walk):
+    """Recurse into `tag`, padding a block element with spaces so the text
+    before and after it never runs together."""
+    block = tag.name in BLOCK
+    if block:
+        add(verses, key, " ")
+    walk(tag)
+    if block:
+        add(verses, key, " ")
 
 
 # --------------------------------------------------------------------------- ESV
@@ -85,14 +106,40 @@ def parse_esv(zf, verses):
                         continue
                     if "book-name" in cls:
                         continue
-                    walk(ch)
+                    descend(verses, (book, state["c"], state["v"]), ch, walk)
 
         walk(body)
 
 
 # --------------------------------------------------------------------------- French
+FR_VERSE_ID = re.compile(r"^v([A-Za-z0-9]+)\.(\d+)\.(\d+)$")
+
+
+def walk_fr(body, verses):
+    """Accumulate the verse text under `body` (one BFC chapter file's <body>)
+    into `verses`. Split out from parse_fr so it can be tested on a snippet."""
+    state = {"key": None}
+
+    def walk(node):
+        for ch in node.children:
+            if isinstance(ch, NavigableString):
+                add(verses, state["key"], str(ch))
+            elif ch.name:
+                if ch.name in ("h1", "h2", "h3", "h4"):
+                    continue
+                if ch.name == "a" and "verse" in classes(ch):
+                    m = FR_VERSE_ID.match(ch.get("id", ""))
+                    if m and m.group(1) in OSIS_NR:
+                        state["key"] = (OSIS_NR[m.group(1)], int(m.group(2)), int(m.group(3)))
+                    else:
+                        state["key"] = None  # deuterocanonical / unknown
+                    continue
+                descend(verses, state["key"], ch, walk)
+
+    walk(body)
+
+
 def parse_fr(zf, verses):
-    vid = re.compile(r"^v([A-Za-z0-9]+)\.(\d+)\.(\d+)$")
     for name in sorted(zf.namelist()):
         base = name.rsplit("/", 1)[-1]
         if not re.match(r"^[A-Za-z0-9]+-\d+\.xml$", base):  # scripture chapters only
@@ -103,25 +150,7 @@ def parse_fr(zf, verses):
         body = soup.body
         if body is None:
             continue
-        state = {"key": None}
-
-        def walk(node):
-            for ch in node.children:
-                if isinstance(ch, NavigableString):
-                    add(verses, state["key"], str(ch))
-                elif ch.name:
-                    if ch.name in ("h1", "h2", "h3", "h4"):
-                        continue
-                    if ch.name == "a" and "verse" in classes(ch):
-                        m = vid.match(ch.get("id", ""))
-                        if m and m.group(1) in OSIS_NR:
-                            state["key"] = (OSIS_NR[m.group(1)], int(m.group(2)), int(m.group(3)))
-                        else:
-                            state["key"] = None  # deuterocanonical / unknown
-                        continue
-                    walk(ch)
-
-        walk(body)
+        walk_fr(body, verses)
 
 
 # --------------------------------------------------------------------------- Norwegian
@@ -173,7 +202,7 @@ def parse_no(zf, verses):
                         continue
                     if "verseheader" in cls:
                         continue
-                    walk(ch)
+                    descend(verses, (book, state["c"], state["v"]), ch, walk)
 
         walk(body)
 

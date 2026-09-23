@@ -14,7 +14,13 @@ Segond may be committed; a copyrighted ESV correspondence stays local). Output
 mimics the bolls format (text with inline <S>n</S>) so the Rust importer reuses
 its tagged-text path.
 
-Usage: build_strongs.py <bible.db> <TRANSLATION_CODE> <out.json>
+Usage: build_strongs.py <bible.db> <TRANSLATION_CODE> <out.json> [--source <text.json>]
+
+The translation's text is read from bible.db, or — with --source — from a
+getbible-style JSON file (what tools/epub2json.py emits). The latter breaks a
+circle for the EPUB-derived texts: they only enter the database *through* the
+output of this script, so regenerating them from a fixed source needs the text
+taken from the file rather than from the database.
 """
 import json
 import re
@@ -33,13 +39,30 @@ def norm(tok):
     return tok.strip(PUNCT).lower()
 
 
+def load_source_json(path):
+    """(book, chapter, verse) -> text, from epub2json's getbible-style layout."""
+    data = json.load(open(path, encoding="utf-8"))
+    out = {}
+    for b in data["books"]:
+        for ch in b["chapters"]:
+            for v in ch["verses"]:
+                out[(b["nr"], v["chapter"], v["verse"])] = v["text"]
+    return out
+
+
 def main():
-    db, code, out = sys.argv[1], sys.argv[2], sys.argv[3]
+    args = sys.argv[1:]
+    source = None
+    if "--source" in args:
+        i = args.index("--source")
+        source = args[i + 1]
+        del args[i:i + 2]
+    db, code, out = args[0], args[1], args[2]
     con = sqlite3.connect(db)
 
     tid = {c: i for (i, c) in con.execute(
         "SELECT id, code FROM translations").fetchall()}
-    target, wlc, sblgnt = tid[code], tid["WLC"], tid["SBLGNT"]
+    wlc, sblgnt = tid["WLC"], tid["SBLGNT"]
 
     # Strong's present per verse (bare number) from the tagged originals.
     strongs_by_verse = defaultdict(set)
@@ -51,9 +74,15 @@ def main():
 
     # Target translation verses (plain text) and their tokens.
     tgt_verses = {}  # (b,c,v) -> original-token list
-    for b, c, v, text in con.execute(
-        "SELECT book, chapter, verse, text FROM verses WHERE translation_id=?", (target,)):
-        tgt_verses[(b, c, v)] = text.split()
+    if source:
+        for ref, text in load_source_json(source).items():
+            tgt_verses[ref] = text.split()
+        print(f"target text: {len(tgt_verses)} verses from {source}")
+    else:
+        for b, c, v, text in con.execute(
+            "SELECT book, chapter, verse, text FROM verses WHERE translation_id=?",
+            (tid[code],)):
+            tgt_verses[(b, c, v)] = text.split()
 
     # Parallel pairs (only verses present in both, deduped per verse).
     corpus = []
