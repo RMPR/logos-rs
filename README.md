@@ -186,9 +186,10 @@ complete Bible database, so the app works offline from the first launch.
   user, no admin rights needed), or unzip the portable
   `LeVerbe-<version>-windows-x64.zip` and run `LeVerbe.exe`.
 
-Releases are built by `.github/workflows/release.yml`: push a tag `vX.Y.Z` to
-publish one; running the workflow by hand only uploads the packages as build
-artifacts. The packaging files live under `packaging/`.
+Releases are built by `.github/workflows/release.yml`: push a tag `vX.Y.Z`, or
+run the workflow by hand from the Actions tab with a version (it then creates
+the tag), to publish one; a manual run with no version only uploads the
+packages as build artifacts. The packaging files live under `packaging/`.
 
 ## Building & running
 

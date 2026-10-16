@@ -3,14 +3,21 @@
 #     container, so it links against that release's libraries)
 #   - a Windows installer (Inno Setup) and a portable .zip
 # Both ship the prebuilt Bible database, so the app works offline from the
-# first launch. Pushing a tag `vX.Y.Z` publishes them as a GitHub release;
-# a manual run only uploads them as workflow artifacts.
+# first launch. Pushing a tag `vX.Y.Z`, or a manual run given a version,
+# publishes them as a GitHub release (a manual run creates the tag on the
+# commit it built); a manual run without a version only uploads them as
+# workflow artifacts.
 name: Release
 
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, e.g. 0.1.0 (tags vX.Y.Z); empty = build only"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -23,13 +30,20 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
       - id: v
         shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+          if [[ -n "$INPUT_VERSION" ]]; then
+            version="${INPUT_VERSION#v}"
+            echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             version="${GITHUB_REF_NAME#v}"
+            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
           else
             cargo_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
             version="${cargo_version}~dev${GITHUB_RUN_NUMBER}"
@@ -115,7 +129,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: needs.version.outputs.tag != ''
     needs: [version, deb, windows]
     runs-on: ubuntu-latest
     permissions:
@@ -130,7 +144,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           ls -la dist
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "LeVerbe ${{ needs.version.outputs.version }}" \
-            --generate-notes
+          tag="${{ needs.version.outputs.tag }}"
+          # A release made by hand in the GitHub UI just gets the packages.
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$tag" dist/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "LeVerbe ${{ needs.version.outputs.version }}" \
+              --generate-notes
+          fi
