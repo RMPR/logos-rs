@@ -37,9 +37,22 @@ fn read_source(path: &Path) -> std::io::Result<String> {
     Ok(out)
 }
 
-/// Path to the built database (`data/bible.db` beside the crate).
+/// Path to the database: the prebuilt copy shipped with an installed package
+/// if there is one, else `data/bible.db` beside the crate (built on first run).
 pub fn db_path() -> PathBuf {
-    data_dir().join("bible.db")
+    bundled_db().unwrap_or_else(|| data_dir().join("bible.db"))
+}
+
+/// The read-only database an installer put next to the executable:
+/// `<exe dir>/data/bible.db` (Windows) or `<prefix>/share/leverbe/bible.db`
+/// for an executable in `<prefix>/bin` (the .deb).
+fn bundled_db() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let share = dir.join("..").join("share").join("leverbe");
+    [dir.join("data").join("bible.db"), share.join("bible.db")]
+        .into_iter()
+        .find(|p| p.is_file())
 }
 
 /// Localized book names: language code → (book nr → name).
@@ -834,7 +847,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     eprintln!("building full-text index…");
     conn.execute_batch("INSERT INTO verses_fts(verses_fts) VALUES('rebuild');")?;
-    conn.execute_batch("PRAGMA journal_mode = WAL; VACUUM; ANALYZE;")?;
+    // A rollback journal, not WAL: the app only ever reads the database, and a
+    // WAL database cannot be opened from a read-only directory (/usr/share).
+    conn.execute_batch("PRAGMA journal_mode = DELETE; VACUUM; ANALYZE;")?;
 
     let verses: i64 = conn.query_row("SELECT count(*) FROM verses", [], |r| r.get(0))?;
     let words: i64 = conn.query_row("SELECT count(*) FROM words", [], |r| r.get(0))?;

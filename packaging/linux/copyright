@@ -1,0 +1,13 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: LeVerbe
+Source: https://github.com/rmpr/logos-rs
+
+Files: *
+Copyright: LeVerbe authors
+Comment:
+ The bundled Bible database (/usr/share/leverbe/bible.db) is built from
+ public-domain and openly licensed texts: KJV with Strong's (bolls.life),
+ unfoldingWord Literal Text (CC BY-SA 4.0), Louis Segond 1910, the Westminster
+ Leningrad Codex / OpenScriptures morphhb (CC BY 4.0), SBLGNT / MorphGNT
+ (CC BY-SA), the Septuagint and Vulgata Clementina (getbible.net), and the
+ OpenScriptures Strong's lexicons. See the project README for details.

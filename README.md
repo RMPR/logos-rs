@@ -99,6 +99,22 @@ JSON). Greek lemmas are bridged to Strong's numbers by accent-insensitive matchi
 Book numbering is aligned across translations using a canonical book id
 (1–39 OT, 40–66 NT), so parallel view and cross-translation word lookup line up.
 
+## Installing
+
+Prebuilt packages of **LeVerbe** are attached to each
+[GitHub release](https://github.com/rmpr/logos-rs/releases). Both include the
+complete Bible database, so the app works offline from the first launch.
+
+- **Ubuntu 26.04 (Resolute Raccoon)**: `sudo apt install ./leverbe_<version>_amd64.deb`,
+  then start **LeVerbe** from the app grid or run `leverbe`.
+- **Windows (x64)**: run `LeVerbe-<version>-windows-x64-setup.exe` (installs per
+  user, no admin rights needed), or unzip the portable
+  `LeVerbe-<version>-windows-x64.zip` and run `LeVerbe.exe`.
+
+Releases are built by `.github/workflows/release.yml`: push a tag `vX.Y.Z` to
+publish one; running the workflow by hand only uploads the packages as build
+artifacts. The packaging files live under `packaging/`.
+
 ## Building & running
 
 Requires a recent stable Rust toolchain.
