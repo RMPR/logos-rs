@@ -1,0 +1,136 @@
+# Builds the LeVerbe packages:
+#   - a .deb for Ubuntu 26.04 "Resolute Raccoon" (built inside an ubuntu:26.04
+#     container, so it links against that release's libraries)
+#   - a Windows installer (Inno Setup) and a portable .zip
+# Both ship the prebuilt Bible database, so the app works offline from the
+# first launch. Pushing a tag `vX.Y.Z` publishes them as a GitHub release;
+# a manual run only uploads them as workflow artifacts.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            cargo_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+            version="${cargo_version}~dev${GITHUB_RUN_NUMBER}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Version: $version"
+
+  deb:
+    needs: version
+    runs-on: ubuntu-latest
+    container: ubuntu:26.04
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential ca-certificates curl git pkg-config dpkg-dev binutils \
+            libfontconfig-dev libfreetype-dev libxkbcommon-dev
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --locked --bin logos-rs --bin import
+      - name: Test
+        # Before the database exists: the tests that need it skip themselves
+        # (some expect user-supplied translations that CI does not have).
+        run: cargo test --release --locked
+      - name: Build the Bible database
+        run: ./target/release/import
+      - name: Build the .deb
+        run: packaging/linux/build-deb.sh "${{ needs.version.outputs.version }}" dist
+      - name: Check the package installs
+        run: |
+          apt-get install -y ./dist/*.deb
+          dpkg -L leverbe
+          test -f /usr/share/leverbe/bible.db
+      - uses: actions/upload-artifact@v4
+        with:
+          name: leverbe-deb
+          path: dist/*.deb
+          if-no-files-found: error
+
+  windows:
+    needs: version
+    runs-on: windows-latest
+    env:
+      # Link the C runtime statically: no Visual C++ Redistributable needed.
+      RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --locked --bin logos-rs --bin import
+      - name: Build the Bible database
+        run: .\target\release\import.exe
+      - name: Stage the app
+        shell: pwsh
+        run: |
+          $app = "dist\LeVerbe"
+          New-Item -ItemType Directory -Force "$app\data" | Out-Null
+          Copy-Item target\release\logos-rs.exe "$app\LeVerbe.exe"
+          Copy-Item data\bible.db "$app\data\bible.db"
+          Copy-Item README.md "$app\README.md"
+          Compress-Archive -Path $app -DestinationPath "dist\LeVerbe-${{ needs.version.outputs.version }}-windows-x64.zip"
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup --no-progress -y }
+          & $iscc "/DAppVersion=${{ needs.version.outputs.version }}" `
+            "/DSourceDir=$PWD\dist\LeVerbe" "/DOutputDir=$PWD\dist" packaging\windows\leverbe.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: leverbe-windows
+          path: |
+            dist/*.zip
+            dist/*.exe
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [version, deb, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -la dist
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "LeVerbe ${{ needs.version.outputs.version }}" \
+            --generate-notes

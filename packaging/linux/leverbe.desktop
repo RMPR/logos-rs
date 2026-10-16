@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=LeVerbe
+GenericName=Bible Study
+Comment=Read and study the Bible in the original languages
+Exec=leverbe
+Icon=leverbe
+Terminal=false
+Categories=Education;Literature;
+Keywords=Bible;Scripture;Hebrew;Greek;Strong;Interlinear;
+StartupWMClass=leverbe
