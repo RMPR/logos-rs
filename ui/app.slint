@@ -16,7 +16,170 @@ export global Theme {
     out property <color> accent-bg: dark ? #2a3550 : #e2ecff;
     out property <color> verse-num: dark ? #7d838d : #9aa0a6;
 
+    out property <color> selection: dark ? #6ea8fe66 : #2563eb40;
+
     out property <length> reading-size: 17px;
+}
+
+// ---------------------------------------------------------------------------
+// Selecting and copying passages.
+//
+// Two kinds of selection, one at a time:
+//  - words: press on a word of a tagged verse and drag, across verses if need
+//    be. A press released without dragging is still a click on the word.
+//  - verses: click a verse number to mark it, shift-click another to mark the
+//    run between them. Copied verses are headed by their reference.
+// Ctrl+C or a verse's context menu copies whichever there is. Prose verses
+// (untagged translations) are ordinary selectable text besides.
+//
+// Rust formats the text, since it alone holds the words, book names and
+// translation codes; the result reaches the clipboard through `clip`, which
+// the main window watches.
+// ---------------------------------------------------------------------------
+export global Passage {
+    /// Column the marked verses are in, or -1 when none are marked.
+    in-out property <int> column: -1;
+    in-out property <int> from;
+    in-out property <int> to;
+    /// The verse the run was started from; shift-clicks extend from it.
+    property <int> anchor;
+
+    /// Column of the word selection, or -1; its ends are word indices of the
+    /// open chapter, in either order.
+    in-out property <int> word-column: -1;
+    property <int> word-anchor;
+    property <int> word-end;
+    /// A word press is in progress, and where the pointer is, in window
+    /// coordinates: each word watches whether it is under it.
+    out property <bool> dragging;
+    out property <length> pointer-x;
+    out property <length> pointer-y;
+    property <bool> moved;
+
+    /// Bumped whenever a selection starts, so the window can take the keys
+    /// back from a focused text and Ctrl+C reaches the selection.
+    out property <int> focus-epoch;
+
+    /// Text ready for the clipboard, and a counter the window watches.
+    out property <string> clip;
+    out property <int> clip-epoch;
+
+    /// `column`'s verses `from`..=`to` of the open chapter, with their
+    /// reference; `from` 0 means the whole chapter.
+    pure callback verses-text(column: int, from: int, to: int) -> string;
+    /// `column`'s words `from`..=`to` of the open chapter, as running text.
+    pure callback words-text(column: int, from: int, to: int) -> string;
+
+    out property <bool> has-selection: root.column >= 0 || root.word-column >= 0;
+
+    public function mark(column: int, verse: int, extend: bool) {
+        root.word-column = -1;
+        if (extend && column == root.column) {
+            root.from = min(root.anchor, verse);
+            root.to = max(root.anchor, verse);
+        } else if (column == root.column && verse == root.from && verse == root.to) {
+            // clicking the one marked verse again unmarks it
+            root.column = -1;
+        } else {
+            root.column = column;
+            root.anchor = verse;
+            root.from = verse;
+            root.to = verse;
+        }
+        root.focus-epoch += 1;
+    }
+
+    public pure function is-marked(column: int, verse: int) -> bool {
+        column == root.column && verse >= root.from && verse <= root.to
+    }
+
+    public function press(column: int, word: int, x: length, y: length) {
+        root.column = -1;
+        root.word-column = column;
+        root.word-anchor = word;
+        root.word-end = word;
+        root.pointer-x = x;
+        root.pointer-y = y;
+        root.dragging = true;
+        root.moved = false;
+        root.focus-epoch += 1;
+    }
+
+    public function drag(x: length, y: length) {
+        root.pointer-x = x;
+        root.pointer-y = y;
+    }
+
+    /// A word reports that the dragging pointer is over it.
+    public function reach(column: int, word: int) {
+        if (root.dragging && column == root.word-column && word != root.word-end) {
+            root.word-end = word;
+            root.moved = true;
+        }
+    }
+
+    /// Ends a press; true when it never left its word, i.e. was a click.
+    public function release() -> bool {
+        root.dragging = false;
+        if (!root.moved) {
+            root.word-column = -1;
+            return true;
+        }
+        false
+    }
+
+    public pure function is-selected(column: int, word: int) -> bool {
+        column == root.word-column
+            && word >= min(root.word-anchor, root.word-end)
+            && word <= max(root.word-anchor, root.word-end)
+    }
+
+    public function clear() {
+        root.column = -1;
+        root.word-column = -1;
+        root.dragging = false;
+    }
+
+    public function put(text: string) {
+        root.clip = text;
+        root.clip-epoch += 1;
+    }
+
+    public function copy-verses(column: int, from: int, to: int) {
+        root.put(root.verses-text(column, from, to));
+    }
+
+    /// Copies the selected words or the marked verses; false when there are
+    /// neither.
+    public function copy-selection() -> bool {
+        if (root.word-column >= 0) {
+            root.put(root.words-text(root.word-column,
+                min(root.word-anchor, root.word-end), max(root.word-anchor, root.word-end)));
+            return true;
+        }
+        if (root.column >= 0) {
+            root.copy-verses(root.column, root.from, root.to);
+            return true;
+        }
+        false
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Text the reader can select and copy. Slint's Text cannot be selected at all,
+// so this is a read-only TextInput dressed as one: drag or double-click to
+// select, Ctrl+C to copy. Like Text it does not wrap unless asked to.
+// ---------------------------------------------------------------------------
+component SelectableText inherits TextInput {
+    read-only: true;
+    single-line: false;
+    color: Theme.text;
+    selection-background-color: Theme.selection;
+    selection-foreground-color: Theme.text;
+    // A TextInput takes up any slack a layout offers, where Text keeps to
+    // its size; keep to Text's manners, and stretch only where asked.
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -110,6 +273,47 @@ component Pill inherits Rectangle {
 }
 
 // ---------------------------------------------------------------------------
+// A verse number. Clicking it marks the verse for copying; shift-clicking
+// another extends the mark to the run between them.
+// ---------------------------------------------------------------------------
+component VerseNumber inherits Rectangle {
+    in property <int> verse;
+    in property <int> column;
+    in property <bool> tagged;
+    /// Leading numbers sit flush against the text; a trailing one (after
+    /// right-to-left words) starts from it.
+    in property <TextHorizontalAlignment> alignment: right;
+    /// A right-click, at this window position: the number's touch area takes
+    /// every press, so the verse's menu has to be opened for it.
+    callback menu-requested(x: length, y: length);
+
+    width: root.tagged ? 26px : 30px;
+    Text {
+        width: 100%;
+        height: 100%;
+        text: root.verse;
+        color: ntouch.has-hover ? Theme.accent : Theme.verse-num;
+        font-size: 12px;
+        font-weight: Passage.is-marked(root.column, root.verse) ? 700 : 400;
+        horizontal-alignment: root.alignment;
+        vertical-alignment: top;
+        // nudge the small number to sit on the text baseline
+        y: root.tagged ? 4px : 3px;
+    }
+    ntouch := TouchArea {
+        mouse-cursor: pointer;
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                Passage.mark(root.column, root.verse, e.modifiers.shift);
+            } else if (e.kind == PointerEventKind.down && e.button == PointerEventButton.right) {
+                root.menu-requested(self.absolute-position.x + self.mouse-x,
+                    self.absolute-position.y + self.mouse-y);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // One verse in one column: the number, then either prose or clickable,
 // morphology-tagged words. Shared by the single-column and the paired views so
 // both render identically.
@@ -123,93 +327,198 @@ component VerseCell inherits Rectangle {
     in property <bool> target;
     callback pick(int, int);           // (column, word index)
 
+    property <bool> marked: Passage.is-marked(root.column, root.verse-row.verse);
+
     // a line the wrap budget mis-sized must not run across the divider
     clip: true;
 
-    // declared first so the word chips above it keep their own clicks
-    vtouch := TouchArea { }
-    background: root.target && root.verse-row.verse > 0
+    // declared first so the word chips above it keep their own clicks; a
+    // click on the verse's empty space drops any selection
+    vtouch := TouchArea {
+        clicked => { Passage.clear(); }
+    }
+    background: (root.target || root.marked) && root.verse-row.verse > 0
         ? Theme.accent-bg
         : (!root.verse-row.tagged && root.verse-row.verse > 0 && vtouch.has-hover)
             ? Theme.panel
             : transparent;
 
-    HorizontalLayout {
-        padding: root.verse-row.tagged ? 5px : 4px;
-        padding-left: 14px;
-        padding-right: 14px;
-        spacing: root.verse-row.tagged ? 8px : 10px;
+    function show-menu(x: length, y: length) {
+        menu.show({ x: x - menu.absolute-position.x, y: y - menu.absolute-position.y });
+    }
 
-        // verse number — leading, except for right-to-left word rows
-        if root.verse-row.verse > 0 && (!root.verse-row.tagged || !root.verse-row.rtl): Text {
-            text: root.verse-row.verse;
-            width: root.verse-row.tagged ? 26px : 30px;
-            color: Theme.verse-num;
-            font-size: 12px;
-            horizontal-alignment: right;
-            vertical-alignment: top;
-            // nudge the small number to sit on the text baseline
-            y: root.verse-row.tagged ? 4px : 3px;
-        }
-
-        // In a paired row the shorter side is given the taller side's height;
-        // the text must sit at the top of that space, not be spread through
-        // it — hence top alignment here and `alignment: start` below.
-        if !root.verse-row.tagged: Text {
-            text: root.verse-row.text;
-            color: Theme.text;
-            font-size: Theme.reading-size;
-            wrap: word-wrap;
-            horizontal-stretch: 1;
-            horizontal-alignment: root.verse-row.rtl ? right : left;
-            vertical-alignment: top;
-        }
-
-        if root.verse-row.tagged: VerticalLayout {
-            horizontal-stretch: 1;
-            spacing: 2px;
-            alignment: start;
-            for line in root.verse-row.lines: HorizontalLayout {
-                spacing: 3px;
-                alignment: root.verse-row.rtl ? end : start;
-                for w in line.words: Rectangle {
-                    border-radius: 4px;
-                    background: (root.column == root.selected-col && w.idx == root.selected-idx)
-                        ? Theme.accent-bg
-                        : (wtouch.has-hover ? Theme.panel-alt : transparent);
-                    HorizontalLayout {
-                        padding: 1px;
-                        padding-left: 3px;
-                        padding-right: 3px;
-                        Text {
-                            text: w.text;
-                            font-size: Theme.reading-size;
-                            color: w.tagged ? Theme.text : Theme.muted;
-                        }
-                    }
-                    // Reader's edition: a rule under the words the apparatus
-                    // below glosses. Slint has no text underline, so it is
-                    // drawn.
-                    if w.rare: Rectangle {
-                        x: 2px;
-                        y: parent.height - 2px;
-                        width: parent.width - 4px;
-                        height: 1px;
-                        background: Theme.accent;
-                    }
-                    wtouch := TouchArea {
-                        clicked => { root.pick(root.column, w.idx); }
-                    }
-                }
+    // Opened by right-clicks nothing above takes, and by the words, whose
+    // touch areas take every press and so open it themselves.
+    menu := ContextMenuArea {
+        enabled: root.verse-row.verse > 0;
+        Menu {
+            MenuItem {
+                title: Passage.word-column >= 0 ? "Copy selection" : "Copy marked verses";
+                enabled: Passage.has-selection;
+                activated => { Passage.copy-selection(); }
+            }
+            MenuItem {
+                title: "Copy verse";
+                activated => { Passage.copy-verses(root.column, root.verse-row.verse, root.verse-row.verse); }
+            }
+            MenuItem {
+                title: "Copy chapter";
+                activated => { Passage.copy-verses(root.column, 0, 0); }
             }
         }
 
-        if root.verse-row.verse > 0 && root.verse-row.tagged && root.verse-row.rtl: Text {
-            text: root.verse-row.verse;
-            width: 26px;
-            color: Theme.verse-num;
-            font-size: 12px;
-            y: 4px;
+        HorizontalLayout {
+            padding: root.verse-row.tagged ? 5px : 4px;
+            padding-left: 14px;
+            padding-right: 14px;
+            spacing: root.verse-row.tagged ? 8px : 10px;
+
+            // verse number — leading, except for right-to-left word rows
+            if root.verse-row.verse > 0 && (!root.verse-row.tagged || !root.verse-row.rtl): VerseNumber {
+                verse: root.verse-row.verse;
+                column: root.column;
+                tagged: root.verse-row.tagged;
+                menu-requested(x, y) => { root.show-menu(x, y); }
+            }
+
+            // In a paired row the shorter side is given the taller side's
+            // height; the text must sit at the top of that space, not be
+            // spread through it — hence top alignment here and
+            // `alignment: start` below. The text has a menu of its own, to
+            // copy what is selected in it.
+            if !root.verse-row.tagged: ContextMenuArea {
+                horizontal-stretch: 1;
+                Menu {
+                    MenuItem {
+                        title: "Copy";
+                        activated => { prose.copy(); }
+                    }
+                    MenuItem {
+                        title: "Copy verse";
+                        activated => { Passage.copy-verses(root.column, root.verse-row.verse, root.verse-row.verse); }
+                    }
+                    MenuItem {
+                        title: "Copy marked verses";
+                        enabled: Passage.column >= 0;
+                        activated => { Passage.copy-selection(); }
+                    }
+                    MenuItem {
+                        title: "Copy chapter";
+                        activated => { Passage.copy-verses(root.column, 0, 0); }
+                    }
+                }
+                prose := SelectableText {
+                    text: root.verse-row.text;
+                    font-size: Theme.reading-size;
+                    wrap: word-wrap;
+                    horizontal-alignment: root.verse-row.rtl ? right : left;
+                    vertical-alignment: top;
+                }
+            }
+
+            if root.verse-row.tagged: VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: 2px;
+                alignment: start;
+                for line in root.verse-row.lines: HorizontalLayout {
+                    spacing: 3px;
+                    alignment: root.verse-row.rtl ? end : start;
+                    for w in line.words: Rectangle {
+                        // Whether a dragging pointer is over this word. The
+                        // change handler evaluates it as the chapter is
+                        // built, before layout has placed anything, so the
+                        // geometry must not be read unless a drag is on. An
+                        // `&&` chain is not enough: the compiler hoists the
+                        // position read above it. An early return is.
+                        pure function under-pointer() -> bool {
+                            if (!Passage.dragging || Passage.word-column != root.column) {
+                                return false;
+                            }
+                            let pos = self.absolute-position;
+                            Passage.pointer-x >= pos.x && Passage.pointer-x < pos.x + self.width
+                                && Passage.pointer-y >= pos.y && Passage.pointer-y < pos.y + self.height
+                        }
+                        property <bool> under: self.under-pointer();
+                        changed under => {
+                            if (self.under) {
+                                Passage.reach(root.column, w.idx);
+                            }
+                        }
+
+                        property <bool> in-selection: Passage.is-selected(root.column, w.idx);
+                        border-radius: 4px;
+                        background: self.in-selection
+                            ? transparent
+                            : (root.column == root.selected-col && w.idx == root.selected-idx)
+                                ? Theme.accent-bg
+                                : (wtouch.has-hover && !Passage.dragging ? Theme.panel-alt : transparent);
+                        // A selection reads as one run, so its tint spans the
+                        // gaps between words (half the line's spacing a side).
+                        Rectangle {
+                            x: -1.5px;
+                            width: parent.width + 3px;
+                            background: parent.in-selection ? Theme.selection : transparent;
+                        }
+                        HorizontalLayout {
+                            padding: 1px;
+                            padding-left: 3px;
+                            padding-right: 3px;
+                            Text {
+                                text: w.text;
+                                font-size: Theme.reading-size;
+                                color: w.tagged ? Theme.text : Theme.muted;
+                            }
+                        }
+                        // Reader's edition: a rule under the words the
+                        // apparatus below glosses. Slint has no text
+                        // underline, so it is drawn.
+                        if w.rare: Rectangle {
+                            x: 2px;
+                            y: parent.height - 2px;
+                            width: parent.width - 4px;
+                            height: 1px;
+                            background: Theme.accent;
+                        }
+                        // Press starts a selection; dragging extends it; a
+                        // release that never left the word is a click, which
+                        // opens the word study.
+                        wtouch := TouchArea {
+                            pointer-event(e) => {
+                                if (e.button == PointerEventButton.left && e.kind == PointerEventKind.down) {
+                                    Passage.press(root.column, w.idx,
+                                        self.absolute-position.x + self.mouse-x,
+                                        self.absolute-position.y + self.mouse-y);
+                                } else if (e.button == PointerEventButton.left && e.kind == PointerEventKind.up) {
+                                    if (Passage.release()) {
+                                        root.pick(root.column, w.idx);
+                                    }
+                                } else if (e.button == PointerEventButton.right && e.kind == PointerEventKind.down) {
+                                    root.show-menu(self.absolute-position.x + self.mouse-x,
+                                        self.absolute-position.y + self.mouse-y);
+                                } else if (e.kind == PointerEventKind.cancel) {
+                                    // the press was taken away (focus lost):
+                                    // keep what was selected, never a click
+                                    Passage.release();
+                                }
+                            }
+                            moved => {
+                                if (self.pressed) {
+                                    Passage.drag(self.absolute-position.x + self.mouse-x,
+                                        self.absolute-position.y + self.mouse-y);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if root.verse-row.verse > 0 && root.verse-row.tagged && root.verse-row.rtl: VerseNumber {
+                verse: root.verse-row.verse;
+                column: root.column;
+                tagged: true;
+                alignment: left;
+                menu-requested(x, y) => { root.show-menu(x, y); }
+            }
         }
     }
 }
@@ -436,28 +745,28 @@ component GlossPane inherits Rectangle {
                     // The original-language forms sit in their own Text
                     // elements so a right-to-left script never reorders the
                     // Latin gloss beside it.
-                    Text {
+                    SelectableText {
                         text: g.surface;
                         width: 110px;
                         color: Theme.text;
                         font-size: Theme.reading-size;
                         horizontal-alignment: g.rtl ? right : left;
                     }
-                    Text {
+                    SelectableText {
                         text: g.lemma;
                         width: 100px;
                         color: Theme.muted;
                         font-size: 15px;
                         horizontal-alignment: g.rtl ? right : left;
                     }
-                    Text {
+                    SelectableText {
                         text: g.gloss;
                         color: Theme.text;
                         font-size: 13px;
                         wrap: word-wrap;
                         horizontal-stretch: 1;
                     }
-                    Text {
+                    SelectableText {
                         text: g.parsing;
                         width: 210px;
                         color: Theme.accent;
@@ -686,6 +995,25 @@ export component MainWindow inherits Window {
         shortcuts.focus();
     }
 
+    // Slint gives Rust no way to write the clipboard, but a TextInput can
+    // copy its own selection: so text bound for the clipboard is put in this
+    // hidden one, selected, and copied.
+    clipper := TextInput {
+        visible: false;
+        width: 0px;
+        height: 0px;
+    }
+    property <int> clip-watch: Passage.clip-epoch;
+    changed clip-watch => {
+        clipper.text = Passage.clip;
+        clipper.select-all();
+        clipper.copy();
+    }
+    // Starting a selection takes the keys back from any text selected before,
+    // so the Ctrl+C that follows copies the new selection.
+    property <int> focus-watch: Passage.focus-epoch;
+    changed focus-watch => { shortcuts.focus(); }
+
     shortcuts := FocusScope {
         capture-key-pressed(event) => {
             if (event.modifiers.control && (event.text == "f" || event.text == "F")) {
@@ -694,6 +1022,18 @@ export component MainWindow inherits Window {
                 } else {
                     root.focus-search += 1;
                 }
+                return accept;
+            }
+            reject
+        }
+        // Bubbling, not capturing: a focused text copies its own selection,
+        // and only otherwise do the selected words or marked verses go.
+        key-pressed(event) => {
+            if (event.modifiers.control && (event.text == "c" || event.text == "C")) {
+                return Passage.copy-selection() ? accept : reject;
+            }
+            if (event.text == Key.Escape && Passage.has-selection) {
+                Passage.clear();
                 return accept;
             }
             reject
@@ -1150,13 +1490,13 @@ export component MainWindow inherits Window {
                             }
                             Pill { label: "✕"; clicked => { root.close-word(); } }
                         }
-                        Text {
+                        SelectableText {
                             text: root.word.surface;
                             color: Theme.text;
                             font-size: 30px;
                             horizontal-alignment: root.word.rtl ? right : left;
                         }
-                        if root.word.translit != "": Text {
+                        if root.word.translit != "": SelectableText {
                             text: root.word.translit;
                             color: Theme.muted;
                             font-size: 15px;
@@ -1171,7 +1511,7 @@ export component MainWindow inherits Window {
                                 HorizontalLayout {
                                     padding-left: 8px;
                                     padding-right: 8px;
-                                    Text {
+                                    SelectableText {
                                         text: root.word.strongs;
                                         color: Theme.accent;
                                         font-size: 13px;
@@ -1180,14 +1520,15 @@ export component MainWindow inherits Window {
                                     }
                                 }
                             }
-                            Text {
+                            SelectableText {
                                 text: root.word.lemma;
                                 color: Theme.text;
                                 font-size: 18px;
                                 vertical-alignment: center;
+                                horizontal-stretch: 1;
                             }
                         }
-                        if root.word.parsing != "": Text {
+                        if root.word.parsing != "": SelectableText {
                             text: root.word.parsing;
                             color: Theme.accent;
                             font-size: 14px;
@@ -1202,12 +1543,12 @@ export component MainWindow inherits Window {
                         }
                         for o in root.word.originals: HorizontalLayout {
                             spacing: 10px;
-                            Text {
+                            SelectableText {
                                 text: o.text;
                                 color: Theme.accent;
                                 font-size: 22px;
                             }
-                            Text {
+                            SelectableText {
                                 text: o.parsing;
                                 color: Theme.muted;
                                 font-size: 12px;
@@ -1216,7 +1557,7 @@ export component MainWindow inherits Window {
                                 horizontal-stretch: 1;
                             }
                         }
-                        if root.word.gloss != "": Text {
+                        if root.word.gloss != "": SelectableText {
                             text: root.word.gloss;
                             color: Theme.text;
                             font-size: 15px;
@@ -1229,7 +1570,10 @@ export component MainWindow inherits Window {
                             VerticalLayout {
                                 width: 100%;
                                 spacing: 8px;
-                                Text {
+                                // the entry reads from the top; slack goes
+                                // below it, not between its parts
+                                alignment: start;
+                                SelectableText {
                                     width: 100%;
                                     text: root.word.definition;
                                     color: Theme.muted;
@@ -1242,7 +1586,7 @@ export component MainWindow inherits Window {
                                     font-size: 11px;
                                     font-weight: 700;
                                 }
-                                if root.word.show-lxx: Text {
+                                if root.word.show-lxx: SelectableText {
                                     width: 100%;
                                     text: root.word.lxx;
                                     color: Theme.text;
@@ -1255,7 +1599,7 @@ export component MainWindow inherits Window {
                                     font-size: 11px;
                                     font-weight: 700;
                                 }
-                                if root.word.show-vulgate: Text {
+                                if root.word.show-vulgate: SelectableText {
                                     width: 100%;
                                     text: root.word.vulgate;
                                     color: Theme.text;

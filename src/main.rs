@@ -557,6 +557,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui.set_selected_idx(-1);
         });
     }
+    {
+        let state = state.clone();
+        ui.global::<Passage>().on_verses_text(move |col, from, to| {
+            let st = state.borrow();
+            let tindex = if col == 0 { st.primary } else { st.secondary };
+            passage_text(&st, &st.translations[tindex], from as i64, to as i64).into()
+        });
+    }
+    {
+        let state = state.clone();
+        ui.global::<Passage>().on_words_text(move |col, from, to| {
+            let st = state.borrow();
+            let words = if col == 0 { &st.primary_words } else { &st.secondary_words };
+            words_text(words, from as usize, to as usize).into()
+        });
+    }
 
     // Closing is the one moment the final window size is known, and the
     // backstop for anything toggled since the last refresh.
@@ -749,9 +765,11 @@ fn refresh_reading(ui: &MainWindow, state: &Rc<RefCell<State>>) {
         ui.set_rows2(ModelRc::new(VecModel::from(secondary_rows)));
     }
 
-    // clear word-selection highlight (indices change with the chapter)
+    // clear word-selection highlight (indices change with the chapter), and
+    // verses marked for copying (they were marked in another passage)
     ui.set_selected_col(-1);
     ui.set_selected_idx(-1);
+    ui.global::<Passage>().invoke_clear();
     // send both columns back to the top of the new passage
     ui.set_nav_epoch(ui.get_nav_epoch() + 1);
 
@@ -882,6 +900,55 @@ fn reader_caption(trans: &Translation, max_freq: i64, entries: usize) -> String 
         "{entries} word{} occurring fewer than {max_freq}× in {corpus}",
         if entries == 1 { "" } else { "s" }
     )
+}
+
+/// Verses `from..=to` of the open chapter in `trans`, for the clipboard:
+/// headed by their reference, numbered when there is more than one. `from` 0
+/// copies the whole chapter.
+fn passage_text(st: &State, trans: &Translation, from: i64, to: i64) -> String {
+    let verses = st.bible.chapter(trans.id, st.book, st.chapter).unwrap_or_default();
+    let book = st
+        .bible
+        .books(trans.id)
+        .ok()
+        .and_then(|bs| bs.into_iter().find(|b| b.nr == st.book))
+        .map_or_else(|| st.book_name(st.book), |b| b.name);
+    let range = (from > 0).then_some((from, to));
+    format_passage(&book, st.chapter, &trans.code, &verses, range)
+}
+
+/// Words `from..=to` of a chapter's flat word list as running text. The words
+/// are the verse text split on spaces, so joining them back restores it.
+fn words_text(words: &[Word], from: usize, to: usize) -> String {
+    let end = (to + 1).min(words.len());
+    words.get(from..end).unwrap_or_default().iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ")
+}
+
+fn format_passage(
+    book: &str,
+    chapter: i64,
+    code: &str,
+    verses: &[bible::Verse],
+    range: Option<(i64, i64)>,
+) -> String {
+    let picked: Vec<&bible::Verse> = verses
+        .iter()
+        .filter(|v| range.is_none_or(|(a, b)| (a..=b).contains(&v.verse)))
+        .collect();
+    let reference = match range {
+        None => format!("{book} {chapter}"),
+        Some((a, b)) if a == b => format!("{book} {chapter}:{a}"),
+        Some((a, b)) => format!("{book} {chapter}:{a}–{b}"),
+    };
+    let mut out = format!("{reference} ({code})");
+    for v in &picked {
+        out.push('\n');
+        if picked.len() > 1 {
+            out.push_str(&format!("{} ", v.verse));
+        }
+        out.push_str(v.text.trim());
+    }
+    out
 }
 
 /// Build plain prose rows for an untagged translation.
@@ -1163,4 +1230,30 @@ fn mark_words(corpus: &Corpus, verse: &VerseId, pick: impl Fn(usize, &search::Wo
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn verse(n: i64, text: &str) -> bible::Verse {
+        bible::Verse { book: 43, chapter: 3, verse: n, text: text.into() }
+    }
+
+    #[test]
+    fn passage_formats_one_verse_a_run_and_a_chapter() {
+        let vs = [verse(16, "For God so loved"), verse(17, "For God sent"), verse(18, "He that")];
+        assert_eq!(
+            format_passage("John", 3, "KJV", &vs, Some((16, 16))),
+            "John 3:16 (KJV)\nFor God so loved"
+        );
+        assert_eq!(
+            format_passage("John", 3, "KJV", &vs, Some((16, 17))),
+            "John 3:16–17 (KJV)\n16 For God so loved\n17 For God sent"
+        );
+        assert_eq!(
+            format_passage("John", 3, "KJV", &vs, None),
+            "John 3 (KJV)\n16 For God so loved\n17 For God sent\n18 He that"
+        );
+    }
 }

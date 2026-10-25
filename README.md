@@ -51,6 +51,12 @@ study experience that runs natively on Linux with a cleaner, faster UX.
   the original word it translates: the Greek for the NT, and the Hebrew **plus the
   parallel Septuagint verse** for the OT (lemma, Strong's, parsing, definition).
   The parallel **Vulgate (Latin)** verse is shown as a reference for both.
+- **Copying** — drag across words to select them, across verses if need be,
+  and `Ctrl+C` copies them (a plain click on a word still opens the word study).
+  Click a verse number to mark it, shift-click another to mark the run, and
+  `Ctrl+C` copies the verses headed by their reference (`Matthew 1:1–3 (ESV)`);
+  `Esc` clears. Right-click a verse for *Copy verse* / *Copy chapter*. The
+  word-study panel and the reader's apparatus are ordinary selectable text.
 - **Localized book names** — the navigation shows each translation's book names in
   its own language (Genèse, בְּרֵאשִׁית, Κατά Ιωάννην, Første Mosebok, …).
 - **Right-to-left** rendering for Hebrew.
