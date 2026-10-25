@@ -18,15 +18,17 @@ slint::include_modules!();
 struct State {
     bible: Bible,
     translations: Vec<Translation>,
-    primary: usize,
-    secondary: usize,
+    /// The open columns, left to right, as indices into `translations`; never
+    /// empty, at most `MAX_COLUMNS`. The first is the primary text: it sets
+    /// the book list, the search and the reader's edition.
+    columns: Vec<usize>,
     primary_books: Vec<Book>,
     book: i64,
     chapter: i64,
     last_results: Vec<SearchHit>,
-    /// Flat per-chapter word lists for the two columns, indexed by chip idx.
-    primary_words: Vec<Word>,
-    secondary_words: Vec<Word>,
+    /// Flat per-chapter word list of each column, indexed by chip idx; empty
+    /// for an untagged text.
+    words: Vec<Vec<Word>>,
     /// Corpus frequency of every lexeme in `freq_tid`, for the reader's
     /// edition. Built once per translation — it is a whole-corpus count.
     freq: HashMap<String, i64>,
@@ -47,6 +49,10 @@ struct State {
     /// Background loads in flight (see `spawn_preload`).
     loading: Vec<std::sync::mpsc::Receiver<Preloaded>>,
 }
+
+/// Columns a reader can open side by side. Beyond four a verse is a word or
+/// two per line; the linked view also has exactly this many cell slots.
+const MAX_COLUMNS: usize = 4;
 
 /// Frequency cut-offs offered for the reader's apparatus. A word is glossed
 /// when its lexeme occurs fewer than this many times in the corpus.
@@ -133,11 +139,16 @@ impl State {
         self.translations.iter().find(|t| t.code == code)
     }
 
-    fn primary_id(&self) -> i64 {
-        self.translations[self.primary].id
+    fn primary(&self) -> usize {
+        self.columns[0]
     }
-    fn secondary_id(&self) -> i64 {
-        self.translations[self.secondary].id
+    fn primary_id(&self) -> i64 {
+        self.translations[self.primary()].id
+    }
+    /// The translation open in a view column, if there is such a column.
+    fn column_translation(&self, col: i32) -> Option<&Translation> {
+        let idx = *self.columns.get(usize::try_from(col).ok()?)?;
+        self.translations.get(idx)
     }
     fn book_name(&self, nr: i64) -> String {
         self.primary_books
@@ -167,12 +178,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Pick up where the last run left off. Every field is a hint: anything
     // that no longer resolves falls back to the default.
     let saved = session::load();
-    let primary = translations.iter().position(|t| t.code == saved.primary).unwrap_or(0);
-    // Default secondary = a different translation if available (LSG).
-    let secondary = translations
+    let mut columns: Vec<usize> = saved
+        .column_codes()
         .iter()
-        .position(|t| t.code == saved.secondary)
-        .unwrap_or(if translations.len() > 1 { 1 } else { 0 });
+        .filter_map(|code| translations.iter().position(|t| &t.code == code))
+        .take(MAX_COLUMNS)
+        .collect();
+    if columns.is_empty() {
+        columns.push(0);
+    }
+    let primary = columns[0];
     let primary_books = bible.books(translations[primary].id)?;
     // The saved book may not exist in this translation (the NT-only texts, a
     // rebuilt database); fall back to its first book, and to its opening
@@ -191,14 +206,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = Rc::new(RefCell::new(State {
         bible,
         translations,
-        primary,
-        secondary,
+        columns,
         primary_books,
         book,
         chapter,
         last_results: Vec::new(),
-        primary_words: Vec::new(),
-        secondary_words: Vec::new(),
+        words: Vec::new(),
         freq: HashMap::new(),
         freq_tid: 0,
         threshold_idx,
@@ -211,7 +224,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }));
 
     let ui = MainWindow::new()?;
-    restore(&ui, &saved, primary, secondary);
+    restore(&ui, &saved);
 
     // Warm the advanced search: load the Hebrew, the Greek and the current
     // translation in the background so the first query is instant.
@@ -324,24 +337,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let (w, state) = ctx!();
         let db_for_preload = db.clone();
-        ui.on_primary_changed(move |idx| {
+        ui.on_translation_changed(move |col, idx| {
             let ui = w.unwrap();
+            let col = col as usize;
             {
                 let mut st = state.borrow_mut();
-                st.primary = idx as usize;
-                let id = st.primary_id();
-                st.primary_books = st.bible.books(id).unwrap_or_default();
-                // If the current book is missing in this translation, jump to its first.
-                if !st.primary_books.iter().any(|b| b.nr == st.book)
-                    && let Some(first) = st.primary_books.first()
-                {
-                    st.book = first.nr;
-                    st.chapter = 1;
+                if col >= st.columns.len() || idx < 0 || idx as usize >= st.translations.len() {
+                    return;
+                }
+                st.columns[col] = idx as usize;
+                if col == 0 {
+                    let id = st.primary_id();
+                    st.primary_books = st.bible.books(id).unwrap_or_default();
+                    // If the current book is missing in this translation, jump to its first.
+                    if !st.primary_books.iter().any(|b| b.nr == st.book)
+                        && let Some(first) = st.primary_books.first()
+                    {
+                        st.book = first.nr;
+                        st.chapter = 1;
+                    }
                 }
             }
-            refresh_books(&ui, &state.borrow());
+            if col == 0 {
+                refresh_books(&ui, &state.borrow());
+            }
             refresh_reading(&ui, &state);
-            {
+            if col == 0 {
+                // the advanced search shows its hits in the primary text
                 let mut st = state.borrow_mut();
                 let jobs = preload_jobs(&st);
                 if !jobs.is_empty() {
@@ -353,17 +375,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     {
         let (w, state) = ctx!();
-        ui.on_secondary_changed(move |idx| {
+        ui.on_add_column(move || {
             let ui = w.unwrap();
-            state.borrow_mut().secondary = idx as usize;
+            {
+                let mut st = state.borrow_mut();
+                if st.columns.len() >= MAX_COLUMNS {
+                    return;
+                }
+                // a text not already open, if any is left
+                let next = (0..st.translations.len())
+                    .find(|i| !st.columns.contains(i))
+                    .unwrap_or(st.columns[st.columns.len() - 1]);
+                st.columns.push(next);
+            }
             refresh_reading(&ui, &state);
         });
     }
     {
         let (w, state) = ctx!();
-        ui.on_toggle_parallel(move || {
+        ui.on_remove_column(move |col| {
             let ui = w.unwrap();
-            ui.set_parallel(!ui.get_parallel());
+            let primary_changed;
+            {
+                let mut st = state.borrow_mut();
+                let col = col as usize;
+                if st.columns.len() <= 1 || col >= st.columns.len() {
+                    return;
+                }
+                st.columns.remove(col);
+                primary_changed = col == 0;
+                if primary_changed {
+                    let id = st.primary_id();
+                    st.primary_books = st.bible.books(id).unwrap_or_default();
+                    if !st.primary_books.iter().any(|b| b.nr == st.book)
+                        && let Some(first) = st.primary_books.first()
+                    {
+                        st.book = first.nr;
+                        st.chapter = 1;
+                    }
+                }
+            }
+            if primary_changed {
+                refresh_books(&ui, &state.borrow());
+            }
             refresh_reading(&ui, &state);
         });
     }
@@ -463,10 +517,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.on_word_clicked(move |col, idx| {
             let ui = w.unwrap();
             let st = state.borrow();
-            let tindex = if col == 0 { st.primary } else { st.secondary };
-            let trans = st.translations[tindex].clone();
-            let words = if col == 0 { &st.primary_words } else { &st.secondary_words };
-            let Some(word) = words.get(idx as usize).cloned() else { return };
+            let Some(trans) = st.column_translation(col).cloned() else { return };
+            let Some(word) =
+                st.words.get(col as usize).and_then(|ws| ws.get(idx as usize)).cloned()
+            else {
+                return;
+            };
 
             // A modern-language translation (KJV/ULT/LSG…) — as opposed to the
             // original-language texts (Hebrew/Greek), whose words ARE the original.
@@ -561,15 +617,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let state = state.clone();
         ui.global::<Passage>().on_verses_text(move |col, from, to| {
             let st = state.borrow();
-            let tindex = if col == 0 { st.primary } else { st.secondary };
-            passage_text(&st, &st.translations[tindex], from as i64, to as i64).into()
+            let Some(trans) = st.column_translation(col) else { return SharedString::default() };
+            passage_text(&st, trans, from as i64, to as i64).into()
         });
     }
     {
         let state = state.clone();
         ui.global::<Passage>().on_words_text(move |col, from, to| {
             let st = state.borrow();
-            let words = if col == 0 { &st.primary_words } else { &st.secondary_words };
+            let words = st.words.get(col as usize).map_or(&[][..], Vec::as_slice);
             words_text(words, from as usize, to as usize).into()
         });
     }
@@ -592,13 +648,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Put the window back the way it was left, before the first refresh reads
 /// these flags.
-fn restore(ui: &MainWindow, saved: &Session, primary: usize, secondary: usize) {
+fn restore(ui: &MainWindow, saved: &Session) {
     ui.global::<Theme>().set_dark(saved.dark);
-    ui.set_parallel(saved.parallel);
     ui.set_scroll_lock(saved.scroll_lock);
     ui.set_reader(saved.reader);
-    ui.set_primary_index(primary as i32);
-    ui.set_secondary_index(secondary as i32);
     // Guard against a degenerate saved size — a window restored at 1×1 would
     // be unrecoverable without editing the file by hand.
     if let (Some(w), Some(h)) = (saved.width, saved.height)
@@ -623,11 +676,9 @@ fn save_session(ui: &MainWindow, st: &State) {
 fn snapshot(ui: &MainWindow, st: &State) -> Session {
     let size = ui.window().size().to_logical(ui.window().scale_factor());
     Session {
-        primary: st.translations[st.primary].code.clone(),
-        secondary: st.translations[st.secondary].code.clone(),
+        columns: st.columns.iter().map(|&i| st.translations[i].code.clone()).collect(),
         book: st.book,
         chapter: st.chapter,
-        parallel: ui.get_parallel(),
         scroll_lock: ui.get_scroll_lock(),
         reader: ui.get_reader(),
         // Only a hand-picked cut-off is worth restoring; otherwise each corpus
@@ -636,6 +687,7 @@ fn snapshot(ui: &MainWindow, st: &State) -> Session {
         dark: ui.global::<Theme>().get_dark(),
         width: Some(size.width as u32),
         height: Some(size.height as u32),
+        ..Session::default()
     }
 }
 
@@ -672,8 +724,7 @@ fn refresh_reading(ui: &MainWindow, state: &Rc<RefCell<State>>) {
     ui.set_current_book(st.book as i32);
     ui.set_current_chapter(chapter as i32);
 
-    let parallel = ui.get_parallel();
-    let (book, primary, secondary) = (st.book, st.primary, st.secondary);
+    let (book, primary) = (st.book, st.primary());
 
     // ----- primary column -----
     let primary_rtl = st.translations[primary].rtl;
@@ -690,7 +741,6 @@ fn refresh_reading(ui: &MainWindow, state: &Rc<RefCell<State>>) {
     ui.set_primary_title(
         format!("{} {} · {}", st.book_name(book), chapter, st.translations[primary].code).into(),
     );
-    ui.set_primary_subtitle(st.translations[primary].name.clone().into());
 
     // The reader's apparatus needs whole-corpus counts; build them once per
     // translation, and only when the reader actually asks for them.
@@ -701,67 +751,59 @@ fn refresh_reading(ui: &MainWindow, state: &Rc<RefCell<State>>) {
         st.freq = freq;
         st.freq_tid = pid;
     }
+    let max_freq = THRESHOLDS[st.threshold_idx.min(THRESHOLDS.len() - 1)];
 
-    let primary_rows: Vec<VerseRow>;
-    if st.translations[primary].tagged {
-        let max_freq = THRESHOLDS[st.threshold_idx.min(THRESHOLDS.len() - 1)];
-        let reader = reader_on.then(|| Reader { freq: &st.freq, max_freq });
-        let (rows, flat) =
-            tagged_rows(&st.bible, pid, book, chapter, primary_rtl, reader.as_ref());
-        primary_rows = rows;
-        if let Some(r) = &reader {
-            let notes = gloss_notes(&flat, r, primary_rtl);
-            ui.set_reader_caption(
-                reader_caption(&st.translations[primary], max_freq, notes.len()).into(),
-            );
-            ui.set_notes(ModelRc::new(VecModel::from(notes)));
+    // ----- every column -----
+    // Only the primary text carries the reader's apparatus.
+    let mut columns: Vec<Vec<VerseRow>> = Vec::new();
+    let mut words: Vec<Vec<Word>> = Vec::new();
+    for (col, &tindex) in st.columns.iter().enumerate() {
+        let trans = &st.translations[tindex];
+        if trans.tagged {
+            let reader = (col == 0 && reader_on).then(|| Reader { freq: &st.freq, max_freq });
+            let (rows, flat) =
+                tagged_rows(&st.bible, trans.id, book, chapter, trans.rtl, reader.as_ref());
+            if let Some(r) = &reader {
+                let notes = gloss_notes(&flat, r, primary_rtl);
+                ui.set_reader_caption(reader_caption(trans, max_freq, notes.len()).into());
+                ui.set_notes(ModelRc::new(VecModel::from(notes)));
+            }
+            columns.push(rows);
+            words.push(flat);
+        } else {
+            let verses = st.bible.chapter(trans.id, book, chapter).unwrap_or_default();
+            columns.push(plain_rows(&verses, trans.rtl));
+            words.push(Vec::new());
         }
-        st.primary_words = flat;
-    } else {
-        let verses = st.bible.chapter(pid, book, chapter).unwrap_or_default();
-        primary_rows = plain_rows(&verses, primary_rtl);
-        st.primary_words.clear();
     }
+    st.words = words;
     if !reader_on {
         ui.set_notes(ModelRc::new(VecModel::default()));
     }
 
-    // ----- secondary column (parallel only) -----
-    let sid = st.secondary_id();
-    let secondary_rtl = st.translations[secondary].rtl;
-    ui.set_secondary_title(st.translations[secondary].name.clone().into());
-    let mut secondary_rows: Vec<VerseRow> = Vec::new();
-    if !parallel {
-        // nothing to lay out when the second column is not on screen
-        st.secondary_words.clear();
-    } else if st.translations[secondary].tagged {
-        let (rows, flat) = tagged_rows(&st.bible, sid, book, chapter, secondary_rtl, None);
-        st.secondary_words = flat;
-        secondary_rows = rows;
-    } else {
-        let verses2 = st.bible.chapter(sid, book, chapter).unwrap_or_default();
-        secondary_rows = plain_rows(&verses2, secondary_rtl);
-        st.secondary_words.clear();
-    }
-
-    // Locked parallel reading is one list of paired verses rather than two
-    // lists kept in step, so only the view actually on screen is built.
-    let locked = parallel && ui.get_scroll_lock();
+    // Linked parallel reading is one list of aligned verses rather than lists
+    // kept in step, so only the view actually on screen is built.
+    let linked = columns.len() > 1 && ui.get_scroll_lock();
     // A search hit lands on its verse: hand the view the row index (rows are
     // in verse order but a translation may skip a verse, so look it up), or
     // -1 for the top of the chapter.
     let target = st.target_verse.take().map(|v| v as i32);
-    if locked {
-        let pairs = pair_rows(&primary_rows, &secondary_rows);
+    let view = |rows: Vec<VerseRow>, col: usize| ColumnView {
+        translation: st.columns[col] as i32,
+        rows: ModelRc::new(VecModel::from(rows)),
+    };
+    if linked {
+        let pairs = pair_rows(&columns);
         ui.set_target_index(row_index(pairs.iter().map(|p| p.verse), target));
         ui.set_pairs(ModelRc::new(VecModel::from(pairs)));
-        ui.set_rows(ModelRc::new(VecModel::default()));
-        ui.set_rows2(ModelRc::new(VecModel::default()));
+        let views: Vec<ColumnView> = (0..columns.len()).map(|c| view(Vec::new(), c)).collect();
+        ui.set_columns(ModelRc::new(VecModel::from(views)));
     } else {
-        ui.set_target_index(row_index(primary_rows.iter().map(|r| r.verse), target));
+        ui.set_target_index(row_index(columns[0].iter().map(|r| r.verse), target));
         ui.set_pairs(ModelRc::new(VecModel::default()));
-        ui.set_rows(ModelRc::new(VecModel::from(primary_rows)));
-        ui.set_rows2(ModelRc::new(VecModel::from(secondary_rows)));
+        let views: Vec<ColumnView> =
+            columns.into_iter().enumerate().map(|(c, rows)| view(rows, c)).collect();
+        ui.set_columns(ModelRc::new(VecModel::from(views)));
     }
 
     // clear word-selection highlight (indices change with the chapter), and
@@ -947,14 +989,14 @@ fn row_index(verses: impl Iterator<Item = i32>, verse: Option<i32>) -> i32 {
     }
 }
 
-/// Pair the two translations verse by verse for the locked view.
+/// Align the columns verse by verse for the linked view.
 ///
 /// Matched on verse number rather than position: versification differs between
-/// translations, so one may carry a verse the other does not. A missing side
+/// translations, so one may carry a verse another does not. A missing verse
 /// becomes an empty cell (`VerseRow::default()`, whose verse is 0) and the
 /// rest of the chapter stays aligned.
-fn pair_rows(left: &[VerseRow], right: &[VerseRow]) -> Vec<PairRow> {
-    let mut verses: Vec<i32> = left.iter().chain(right).map(|r| r.verse).collect();
+fn pair_rows(columns: &[Vec<VerseRow>]) -> Vec<PairRow> {
+    let mut verses: Vec<i32> = columns.iter().flatten().map(|r| r.verse).collect();
     verses.sort_unstable();
     verses.dedup();
     let cell = |rows: &[VerseRow], v: i32| {
@@ -962,7 +1004,10 @@ fn pair_rows(left: &[VerseRow], right: &[VerseRow]) -> Vec<PairRow> {
     };
     verses
         .iter()
-        .map(|&v| PairRow { verse: v, left: cell(left, v), right: cell(right, v) })
+        .map(|&v| {
+            let cells: Vec<VerseRow> = columns.iter().map(|rows| cell(rows, v)).collect();
+            PairRow { verse: v, cells: ModelRc::new(VecModel::from(cells)) }
+        })
         .collect()
 }
 

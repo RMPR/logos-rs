@@ -15,13 +15,20 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Session {
-    /// Translation codes rather than list indices: indices shift whenever the
-    /// database gains or loses a text.
+    /// The open columns, left to right, as translation codes rather than
+    /// list indices: indices shift whenever the database gains or loses a text.
+    pub columns: Vec<String>,
+    /// Before `columns`, a session held a primary and a secondary text and
+    /// whether the second was shown. Read so an older file still restores
+    /// its texts; never written.
+    #[serde(skip_serializing)]
     pub primary: String,
+    #[serde(skip_serializing)]
     pub secondary: String,
+    #[serde(skip_serializing)]
+    pub parallel: bool,
     pub book: i64,
     pub chapter: i64,
-    pub parallel: bool,
     pub scroll_lock: bool,
     pub reader: bool,
     /// The cut-off the reader chose by hand, as a count. `None` leaves each
@@ -38,11 +45,12 @@ pub struct Session {
 impl Default for Session {
     fn default() -> Self {
         Self {
+            columns: Vec::new(),
             primary: String::new(),
             secondary: String::new(),
+            parallel: false,
             book: 1,
             chapter: 1,
-            parallel: false,
             scroll_lock: true,
             reader: false,
             threshold: None,
@@ -50,6 +58,21 @@ impl Default for Session {
             width: None,
             height: None,
         }
+    }
+}
+
+impl Session {
+    /// The open columns, from `columns` or, in an older file, from the
+    /// primary and secondary texts.
+    pub fn column_codes(&self) -> Vec<String> {
+        if !self.columns.is_empty() {
+            return self.columns.clone();
+        }
+        let mut codes = vec![self.primary.clone()];
+        if self.parallel {
+            codes.push(self.secondary.clone());
+        }
+        codes
     }
 }
 
@@ -95,6 +118,22 @@ mod tests {
         assert_eq!(s.chapter, 1); // defaulted
         assert!(s.scroll_lock); // defaulted, not false
         assert_eq!(s.threshold, None);
+    }
+
+    #[test]
+    fn a_two_text_session_becomes_columns() {
+        let old: Session = serde_json::from_str(
+            r#"{"primary":"KJV","secondary":"LSG","parallel":true}"#,
+        )
+        .unwrap();
+        assert_eq!(old.column_codes(), ["KJV", "LSG"]);
+        let single: Session =
+            serde_json::from_str(r#"{"primary":"KJV","secondary":"LSG"}"#).unwrap();
+        assert_eq!(single.column_codes(), ["KJV"]);
+        let new: Session = serde_json::from_str(r#"{"columns":["WLC","KJV","LSG"]}"#).unwrap();
+        assert_eq!(new.column_codes(), ["WLC", "KJV", "LSG"]);
+        // the old fields are only ever read
+        assert!(!serde_json::to_string(&new).unwrap().contains("primary"));
     }
 
     #[test]

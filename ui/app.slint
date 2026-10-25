@@ -226,10 +226,15 @@ export struct GlossItem {
     rtl: bool,
 }
 
-// One verse across both translations, for the locked parallel view. A cell
-// whose `verse` is 0 is absent on that side — versification differs between
-// translations, so a verse can exist in one and not the other.
-export struct PairRow { verse: int, left: VerseRow, right: VerseRow }
+// One verse across every open translation, for the linked parallel view: a
+// cell per column. A cell whose `verse` is 0 is absent in that column —
+// versification differs between translations, so a verse can exist in one and
+// not another.
+export struct PairRow { verse: int, cells: [VerseRow] }
+
+// One open column: the translation in it (an index into the translation list)
+// and, when the columns scroll independently, its verses.
+export struct ColumnView { translation: int, rows: [VerseRow] }
 
 export struct OriginalWord { text: string, parsing: string }
 export struct WordInfo {
@@ -318,7 +323,7 @@ component VerseNumber inherits Rectangle {
 // ---------------------------------------------------------------------------
 component VerseCell inherits Rectangle {
     in property <VerseRow> verse-row;
-    in property <int> column;          // 0 = primary, 1 = secondary
+    in property <int> column;          // 0 = primary, then left to right
     in property <int> selected-col;
     in property <int> selected-idx;
     /// The verse a search hit was opened on — tinted so the eye lands on it.
@@ -639,16 +644,19 @@ component ReadingColumn inherits VerseScroller {
 }
 
 // ---------------------------------------------------------------------------
-// The locked parallel view: both translations in ONE list, verse beside verse.
+// The linked parallel view: every translation in ONE list, verse beside verse.
 //
-// This is what makes locked scrolling exact rather than approximate. Two
+// This is what makes linked scrolling exact rather than approximate. Separate
 // scrollers can only ever be kept in step by estimating where one has got to
-// and mapping that onto the other, and they drift apart. Here there is a
-// single scroller and a single row per verse, the taller side setting the
+// and mapping that onto the others, and they drift apart. Here there is a
+// single scroller and a single row per verse, the tallest cell setting the
 // height, so the columns cannot come apart at all.
 // ---------------------------------------------------------------------------
 component PairedColumn inherits VerseScroller {
     in property <[PairRow]> rows;
+    /// Columns on screen, 2 to 4: a row has a cell slot for each of the four
+    /// a reader can open, and shows the first `count`.
+    in property <int> count: 2;
     in property <int> selected-col;
     in property <int> selected-idx;
     callback pick(int, int);
@@ -659,44 +667,72 @@ component PairedColumn inherits VerseScroller {
     // that same layout's own solved outputs: a height-for-width cycle Slint
     // cannot resolve. Here the widths come straight from the row's width,
     // which the body assigns in its width pass, independent of any height.
+    //
+    // Four named slots rather than a repeater: the row's height is the
+    // tallest of its cells, and Slint can only take a maximum over elements
+    // it can name.
     for p[i] in root.rows: Rectangle {
-        height: max(lcell.preferred-height, rcell.preferred-height);
+        property <length> cell-width: (self.width - (root.count - 1) * 1px) / root.count;
+        height: max(
+            max(c0.preferred-height, c1.preferred-height),
+            max(root.count > 2 ? c2.preferred-height : 0px, root.count > 3 ? c3.preferred-height : 0px));
         // only the target row's timer runs; it reads y once layout has run
         Timer {
             interval: 50ms;
             running: i == root.target-index;
             triggered => { root.land-at(parent.y); }
         }
-        lcell := VerseCell {
+        c0 := VerseCell {
             x: 0;
-            y: 0;
-            width: (parent.width - 1px) / 2;
+            width: parent.cell-width;
             height: parent.height;
-            verse-row: p.left;
+            verse-row: p.cells[0];
             column: 0;
             selected-col: root.selected-col;
             selected-idx: root.selected-idx;
             target: i == root.target-index;
-            pick(c, i) => { root.pick(c, i); }
+            pick(c, w) => { root.pick(c, w); }
         }
-        Rectangle {
-            x: lcell.width;
-            y: 0;
-            width: 1px;
+        c1 := VerseCell {
+            x: parent.cell-width + 1px;
+            width: parent.cell-width;
             height: parent.height;
-            background: Theme.border;
-        }
-        rcell := VerseCell {
-            x: lcell.width + 1px;
-            y: 0;
-            width: parent.width - lcell.width - 1px;
-            height: parent.height;
-            verse-row: p.right;
+            verse-row: p.cells[1];
             column: 1;
             selected-col: root.selected-col;
             selected-idx: root.selected-idx;
             target: i == root.target-index;
-            pick(c, i) => { root.pick(c, i); }
+            pick(c, w) => { root.pick(c, w); }
+        }
+        c2 := VerseCell {
+            visible: root.count > 2;
+            x: 2 * (parent.cell-width + 1px);
+            width: parent.cell-width;
+            height: parent.height;
+            verse-row: p.cells[2];
+            column: 2;
+            selected-col: root.selected-col;
+            selected-idx: root.selected-idx;
+            target: i == root.target-index;
+            pick(c, w) => { root.pick(c, w); }
+        }
+        c3 := VerseCell {
+            visible: root.count > 3;
+            x: 3 * (parent.cell-width + 1px);
+            width: parent.cell-width;
+            height: parent.height;
+            verse-row: p.cells[3];
+            column: 3;
+            selected-col: root.selected-col;
+            selected-idx: root.selected-idx;
+            target: i == root.target-index;
+            pick(c, w) => { root.pick(c, w); }
+        }
+        for d in root.count - 1: Rectangle {
+            x: (d + 1) * (parent.cell-width + 1px) - 1px;
+            width: 1px;
+            height: parent.height;
+            background: Theme.border;
         }
     }
 }
@@ -799,104 +835,103 @@ component GlossPane inherits Rectangle {
 }
 
 // ---------------------------------------------------------------------------
-// The reading area: one translation, or two side by side — locked into a
-// single list, or scrolling independently.
+// The reading area: one to four translations side by side — linked into a
+// single list, or scrolling independently. Each column is headed by the
+// picker for its translation.
 // ---------------------------------------------------------------------------
 component ParallelColumns inherits Rectangle {
-    in property <[VerseRow]> rows;
-    in property <[VerseRow]> rows2;
+    in property <[string]> translation-labels;
+    in property <[ColumnView]> columns;
     in property <[PairRow]> pairs;
-    in property <bool> parallel;
     in property <bool> scroll-lock;
-    in property <string> subtitle;
-    in property <string> subtitle2;
     in property <int> selected-col;
     in property <int> selected-idx;
     in property <int> nav-epoch;
     in property <int> target-index: -1;
     callback pick(int, int);
+    callback translation-changed(int, int);  // (column, translation index)
+    callback remove-column(int);
 
+    property <bool> linked: root.scroll-lock && root.columns.length > 1;
+
+    // Columns are equal shares of the width: equal stretch with zeroed
+    // preferred/minimum widths, never a `width: parent.width / n` binding,
+    // which would ask a layout for its output while it is still being solved.
+    // Each column after the first draws the divider on its left edge, so the
+    // headings and the text below share one grid.
     VerticalLayout {
-        // Column headings, split on the same 50/50 grid as the text below.
-        // Halves come from equal stretch with zeroed preferred/minimum widths,
-        // never from a `width: parent.width / 2` binding: a fixed width is
-        // part of an element's layout-info, and reading the parent's width
-        // there asks a layout for its output while it is still being solved.
-        if root.parallel: HorizontalLayout {
-            height: 30px;
-            Rectangle {
+        HorizontalLayout {
+            height: 40px;
+            for c[i] in root.columns: Rectangle {
                 horizontal-stretch: 1;
                 preferred-width: 0px;
                 min-width: 0px;
-                Text {
-                    text: root.subtitle;
-                    color: Theme.muted;
-                    font-size: 13px;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
+                if i > 0: Rectangle {
+                    x: 0;
+                    width: 1px;
+                    background: Theme.border;
                 }
-            }
-            Rectangle { width: 1px; background: Theme.border; }
-            Rectangle {
-                horizontal-stretch: 1;
-                preferred-width: 0px;
-                min-width: 0px;
-                Text {
-                    text: root.subtitle2;
-                    color: Theme.muted;
-                    font-size: 13px;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
+                HorizontalLayout {
+                    padding: 6px;
+                    padding-left: 14px;
+                    padding-right: 10px;
+                    spacing: 6px;
+                    ComboBox {
+                        horizontal-stretch: 1;
+                        min-width: 0px;
+                        max-width: 420px;
+                        model: root.translation-labels;
+                        current-index: c.translation;
+                        selected(v) => { root.translation-changed(i, self.current-index); }
+                    }
+                    // the picker keeps to its width; the slack sits before
+                    // the close button, which stays at the column's edge
+                    Rectangle { horizontal-stretch: 1; }
+                    if root.columns.length > 1: VerticalLayout {
+                        alignment: center;
+                        Pill {
+                            label: "✕";
+                            clicked => { root.remove-column(i); }
+                        }
+                    }
                 }
             }
         }
 
-        if !root.parallel: ReadingColumn {
-            rows: root.rows;
-            column: 0;
-            selected-col: root.selected-col;
-            selected-idx: root.selected-idx;
-            nav-epoch: root.nav-epoch;
-            target-index: root.target-index;
-            pick(c, i) => { root.pick(c, i); }
-        }
-
-        if root.parallel && root.scroll-lock: PairedColumn {
+        if root.linked: PairedColumn {
             rows: root.pairs;
+            count: root.columns.length;
             selected-col: root.selected-col;
             selected-idx: root.selected-idx;
             nav-epoch: root.nav-epoch;
             target-index: root.target-index;
-            pick(c, i) => { root.pick(c, i); }
+            pick(c, w) => { root.pick(c, w); }
         }
 
-        // Unlocked: two lists, each minding its own scroll position. Nothing
-        // keeps them in step, which is the point.
-        if root.parallel && !root.scroll-lock: HorizontalLayout {
-            ReadingColumn {
+        // Unlinked (or a single column): a list per column, each minding its
+        // own scroll position. Nothing keeps them in step, which is the point.
+        if !root.linked: HorizontalLayout {
+            for c[i] in root.columns: Rectangle {
                 horizontal-stretch: 1;
                 preferred-width: 0px;
                 min-width: 0px;
-                rows: root.rows;
-                column: 0;
-                selected-col: root.selected-col;
-                selected-idx: root.selected-idx;
-                nav-epoch: root.nav-epoch;
-                target-index: root.target-index;
-                pick(c, i) => { root.pick(c, i); }
-            }
-            Rectangle { width: 1px; background: Theme.border; }
-            ReadingColumn {
-                horizontal-stretch: 1;
-                preferred-width: 0px;
-                min-width: 0px;
-                rows: root.rows2;
-                column: 1;
-                selected-col: root.selected-col;
-                selected-idx: root.selected-idx;
-                nav-epoch: root.nav-epoch;
-                target-index: root.target-index;
-                pick(c, i) => { root.pick(c, i); }
+                if i > 0: Rectangle {
+                    x: 0;
+                    width: 1px;
+                    background: Theme.border;
+                }
+                ReadingColumn {
+                    x: i > 0 ? 1px : 0px;
+                    width: parent.width - self.x;
+                    height: parent.height;
+                    rows: c.rows;
+                    column: i;
+                    selected-col: root.selected-col;
+                    selected-idx: root.selected-idx;
+                    nav-epoch: root.nav-epoch;
+                    target-index: root.target-index;
+                    pick(col, w) => { root.pick(col, w); }
+                }
             }
         }
     }
@@ -916,15 +951,12 @@ export component MainWindow inherits Window {
     // --- data in from Rust ---
     in property <[TranslationItem]> translations;
     in property <[string]> translation-labels;
-    /// Which entry each picker starts on, so a restored session shows the
-    /// text it actually opened.
-    in property <int> primary-index;
-    in property <int> secondary-index;
     in property <[BookItem]> books;
     in property <[int]> chapters;
-    in property <[VerseRow]> rows;      // primary column
-    in property <[VerseRow]> rows2;     // secondary column (parallel, unlocked)
-    in property <[PairRow]> pairs;      // both columns as one list (locked)
+    /// The open columns, 1 to 4; the first is the primary text, which sets
+    /// the book list, the search and the reader's edition.
+    in property <[ColumnView]> columns;
+    in property <[PairRow]> pairs;      // all columns as one list (linked)
     in property <[SearchItem]> results;
 
     // reader's edition
@@ -943,21 +975,18 @@ export component MainWindow inherits Window {
     in-out property <int> selected-col: -1;
     in-out property <int> selected-idx: -1;
     in property <string> primary-title;
-    in property <string> primary-subtitle;
-    in property <string> secondary-title;
     in property <string> results-summary;
 
     in-out property <int> current-book;
     in-out property <int> current-chapter;
-    in-out property <bool> parallel;
     in-out property <bool> show-results;
     in-out property <string> command;
 
     // --- parallel scroll locking ---
-    // On by default: scrolling either column moves the other to the same
-    // verse. Rust resets both columns to the top on navigation.
+    // On by default: the columns scroll together, verse beside verse. Rust
+    // resets them to the top on navigation.
     in-out property <bool> scroll-lock: true;
-    /// Bumped by Rust whenever the passage changes, to send both columns back
+    /// Bumped by Rust whenever the passage changes, to send the columns back
     /// to the top of the new chapter — or to `target-index`, the row of a
     /// search hit, when that is set.
     in property <int> nav-epoch;
@@ -977,9 +1006,9 @@ export component MainWindow inherits Window {
     callback select-chapter(int);
     callback go(string);
     callback open-result(int);
-    callback primary-changed(int);
-    callback secondary-changed(int);
-    callback toggle-parallel();
+    callback translation-changed(int, int);  // (column, translation index)
+    callback add-column();
+    callback remove-column(int);
     callback toggle-theme();
     callback prev-chapter();
     callback next-chapter();
@@ -1094,12 +1123,13 @@ export component MainWindow inherits Window {
                             clicked => { root.toggle-advanced(); }
                         }
                     }
-                    VerticalLayout {
+                    // Four columns at most: beyond that a verse is a word or
+                    // two per line.
+                    if root.columns.length < 4: VerticalLayout {
                         alignment: center;
                         Pill {
-                            label: root.parallel ? "Parallel ✓" : "Parallel";
-                            active: root.parallel;
-                            clicked => { root.toggle-parallel(); }
+                            label: "＋ Column";
+                            clicked => { root.add-column(); }
                         }
                     }
                     if root.reader-available: VerticalLayout {
@@ -1110,7 +1140,7 @@ export component MainWindow inherits Window {
                             clicked => { root.toggle-reader(); }
                         }
                     }
-                    if root.parallel: VerticalLayout {
+                    if root.columns.length > 1: VerticalLayout {
                         alignment: center;
                         Pill {
                             label: root.scroll-lock ? "🔗 Linked" : "⛓ Unlinked";
@@ -1249,20 +1279,6 @@ export component MainWindow inherits Window {
                     VerticalLayout {
                         padding: 10px;
                         spacing: 8px;
-
-                        // translation pickers
-                        Text { text: "Primary translation"; color: Theme.muted; font-size: 11px; }
-                        ComboBox {
-                            model: root.translation-labels;
-                            current-index: root.primary-index;
-                            selected(v) => { root.primary-changed(self.current-index); }
-                        }
-                        if root.parallel: Text { text: "Secondary translation"; color: Theme.muted; font-size: 11px; }
-                        if root.parallel: ComboBox {
-                            model: root.translation-labels;
-                            current-index: root.secondary-index;
-                            selected(v) => { root.secondary-changed(self.current-index); }
-                        }
 
                         if root.reader && root.reader-available: Text {
                             text: "Gloss words rarer than";
@@ -1455,18 +1471,17 @@ export component MainWindow inherits Window {
 
                         ParallelColumns {
                             vertical-stretch: 1;
-                            rows: root.rows;
-                            rows2: root.rows2;
+                            translation-labels: root.translation-labels;
+                            columns: root.columns;
                             pairs: root.pairs;
-                            parallel: root.parallel;
                             scroll-lock: root.scroll-lock;
-                            subtitle: root.primary-subtitle;
-                            subtitle2: root.secondary-title;
                             selected-col: root.selected-col;
                             selected-idx: root.selected-idx;
                             nav-epoch: root.nav-epoch;
                             target-index: root.target-index;
                             pick(c, i) => { root.word-clicked(c, i); }
+                            translation-changed(c, t) => { root.translation-changed(c, t); }
+                            remove-column(c) => { root.remove-column(c); }
                         }
 
                         if root.reader && root.reader-available: Rectangle {
