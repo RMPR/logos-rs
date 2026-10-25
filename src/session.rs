@@ -35,6 +35,8 @@ pub struct Session {
     /// corpus on its own conventional default.
     pub threshold: Option<i64>,
     pub dark: bool,
+    /// Scale of the Bible text (1.0 is the normal size).
+    pub zoom: f32,
     /// Window size in *logical* pixels — physical ones would be re-scaled by
     /// the display factor on restore, so a HiDPI window would double each run,
     /// and the file would not survive moving between screens.
@@ -55,6 +57,7 @@ impl Default for Session {
             reader: false,
             threshold: None,
             dark: true,
+            zoom: 1.0,
             width: None,
             height: None,
         }

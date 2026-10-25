@@ -18,7 +18,11 @@ export global Theme {
 
     out property <color> selection: dark ? #6ea8fe66 : #2563eb40;
 
-    out property <length> reading-size: 17px;
+    /// Scale of the Bible text, set with Ctrl+plus / Ctrl+minus. The rest of
+    /// the interface keeps its size.
+    in-out property <float> zoom: 1.0;
+    out property <length> reading-size: 17px * root.zoom;
+    out property <length> verse-number-size: 12px * root.zoom;
 }
 
 // ---------------------------------------------------------------------------
@@ -296,12 +300,12 @@ component VerseNumber inherits Rectangle {
         height: 100%;
         text: root.verse;
         color: ntouch.has-hover ? Theme.accent : Theme.verse-num;
-        font-size: 12px;
+        font-size: Theme.verse-number-size;
         font-weight: Passage.is-marked(root.column, root.verse) ? 700 : 400;
         horizontal-alignment: root.alignment;
         vertical-alignment: top;
         // nudge the small number to sit on the text baseline
-        y: root.tagged ? 4px : 3px;
+        y: (root.tagged ? 4px : 3px) * Theme.zoom;
     }
     ntouch := TouchArea {
         mouse-cursor: pointer;
@@ -334,7 +338,7 @@ component VerseCell inherits Rectangle {
 
     property <length> pad-x: 14px;
     property <length> pad-y: root.verse-row.tagged ? 5px : 4px;
-    property <length> number-width: root.verse-row.tagged ? 26px : 30px;
+    property <length> number-width: (root.verse-row.tagged ? 26px : 30px) * Theme.zoom;
     property <length> gap: root.verse-row.tagged ? 8px : 10px;
     property <bool> trailing-number: root.verse-row.tagged && root.verse-row.rtl;
     property <length> body-x: root.pad-x + (root.trailing-number ? 0px : root.number-width + root.gap);
@@ -1018,6 +1022,7 @@ export component MainWindow inherits Window {
     callback toggle-reader();
     callback toggle-scroll-lock();
     callback toggle-advanced();
+    callback zoom-changed();
     callback threshold-changed(int);
 
     // The std-widgets (combo boxes, the search field) take their colours from
@@ -1057,6 +1062,20 @@ export component MainWindow inherits Window {
 
     shortcuts := FocusScope {
         capture-key-pressed(event) => {
+            // Text size, as in a browser: Ctrl+plus, Ctrl+minus, and Ctrl+=
+            // (or Ctrl+0) for the normal size. On most layouts plus is
+            // Shift+=, so plain Ctrl+= is free to mean "reset".
+            if (event.modifiers.control && (event.text == "+" || event.text == "-" || event.text == "=" || event.text == "0")) {
+                if (event.text == "+") {
+                    Theme.zoom = min(2.5, round(Theme.zoom * 10 + 1) / 10);
+                } else if (event.text == "-") {
+                    Theme.zoom = max(0.6, round(Theme.zoom * 10 - 1) / 10);
+                } else {
+                    Theme.zoom = 1.0;
+                }
+                root.zoom-changed();
+                return accept;
+            }
             if (event.modifiers.control && (event.text == "f" || event.text == "F")) {
                 if (event.modifiers.shift) {
                     root.toggle-advanced();

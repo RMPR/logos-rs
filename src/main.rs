@@ -462,6 +462,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     {
         let (w, state) = ctx!();
+        ui.on_zoom_changed(move || {
+            save_session(&w.unwrap(), &state.borrow());
+        });
+    }
+    {
+        let (w, state) = ctx!();
         ui.on_toggle_scroll_lock(move || {
             let ui = w.unwrap();
             ui.set_scroll_lock(!ui.get_scroll_lock());
@@ -650,6 +656,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// these flags.
 fn restore(ui: &MainWindow, saved: &Session) {
     ui.global::<Theme>().set_dark(saved.dark);
+    // within the range the zoom keys allow, whatever the file says
+    let zoom = if saved.zoom.is_finite() { saved.zoom.clamp(0.6, 2.5) } else { 1.0 };
+    ui.global::<Theme>().set_zoom(zoom);
     ui.set_scroll_lock(saved.scroll_lock);
     ui.set_reader(saved.reader);
     // Guard against a degenerate saved size — a window restored at 1×1 would
@@ -685,6 +694,7 @@ fn snapshot(ui: &MainWindow, st: &State) -> Session {
         // keeps its own conventional default.
         threshold: st.threshold_pinned.then(|| THRESHOLDS[st.threshold_idx]),
         dark: ui.global::<Theme>().get_dark(),
+        zoom: ui.global::<Theme>().get_zoom(),
         width: Some(size.width as u32),
         height: Some(size.height as u32),
         ..Session::default()
