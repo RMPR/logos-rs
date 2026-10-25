@@ -10,10 +10,21 @@ study experience that runs natively on Linux with a cleaner, faster UX.
 
 - **Reading view** with hanging-indent verse numbers and a Logos-style three-pane
   layout (translation/book/chapter nav · reading pane).
-- **Parallel view** — read two translations side by side, genuinely aligned:
-  locked (the default) renders both texts as a *single* list of paired verses,
-  so verse N always sits beside verse N and the columns cannot drift apart. The
-  **🔗 Linked** pill unlocks them into two independent scrollers.
+- **Parallel view** — read up to four translations side by side (**＋ Column**;
+  each column is headed by its own translation picker and a ✕), genuinely
+  aligned: linked (the default) renders all the texts as a *single* list of
+  aligned verses, so verse N always sits beside verse N and the columns cannot
+  drift apart. The **🔗 Linked** pill unlinks them into independent scrollers.
+  The words wrap to each column's width.
+- **Text size** — `Ctrl+plus` / `Ctrl+minus` zoom the Bible text, `Ctrl+=` (or
+  `Ctrl+0`) puts it back; the size is remembered.
+- **Import your own Bibles** — **⇪ Import** reads an EPUB, a PDF, a Logos
+  personal-book DOCX or a text file you own, finds its books, chapters and
+  verses, and links its words to the Hebrew and Greek, so it reads, searches and
+  clicks like the bundled texts. Imports stay on your computer, in
+  `imports.db` in the user data directory (`~/.local/share/logos-rs/` on Linux,
+  or `$LOGOS_IMPORTS`), and can be removed from the same card. See
+  [Importing a translation](#importing-a-translation).
 - **Search** — `Ctrl+F` jumps to the search box from anywhere. Hits are listed
   in canonical order (Genesis → Revelation), and opening one lands on that verse,
   tinted, rather than at the top of its chapter; **☰ Results** in the header
@@ -66,6 +77,25 @@ study experience that runs natively on Linux with a cleaner, faster UX.
   is accent-insensitive.
 - **Dark / light** themes.
 
+## Importing a translation
+
+**⇪ Import** → **Choose a file…**, check the name, code and language the app
+read from the file, and **Import**. Reading takes a second or two; linking the
+words to the Hebrew and Greek a few seconds more.
+
+| Format | How verses are found |
+|--------|----------------------|
+| EPUB | Crossway (ESV), Société biblique française (BFC) and Bibelselskapet (Bokmål 2011) layouts are read exactly. Any other EPUB is read from what Bible EPUBs share: headings naming the books and chapters, and verse numbers in elements of their own; notes and cross-references are skipped. |
+| PDF | Best effort: a header naming book and chapter ("Genesis 3", often a running page header), and verses that start a line with their number. A PDF in two columns, or with verse numbers inside paragraphs, loses verses. |
+| DOCX | Logos personal-book milestones (`[[@Bible:Gen 1:1]]`, with `{{field-on:bible}}…{{field-off:bible}}` fences); without them, read as plain text a paragraph a line. |
+| Text | As a PDF. |
+
+Words are linked by the same statistical alignment that built the bundled
+Louis Segond, ESV, BFC and Bokmål correspondences (IBM Model 1 against the
+Strong's numbers of WLC and SBLGNT, verse by verse): typically 35–45% of a
+translation's words get a number, the content words that carry one. Only
+import texts you are entitled to use.
+
 ## Translations & data sources
 
 The five bundled translations:
@@ -80,8 +110,10 @@ The five bundled translations:
 | LXX  | Septuagint | Greek (OT) | | getbible.net — includes deuterocanonical books |
 | VUL  | Vulgata Clementina | Latin | | getbible.net — 66 canonical books only (deuterocanon dropped); shown as the Latin reference in the word-study panel |
 
-Optional, **user-provided** translations (copyrighted — supplied by the user from
-licensed EPUBs, **not committed** to the repo). Place the EPUBs and run
+Optional, **user-provided** translations built into `bible.db` itself
+(copyrighted — supplied by the user from licensed EPUBs, **not committed** to
+the repo). For your own use, importing them in the app does the same with no
+tools; for a build that bundles them, place the EPUBs and run
 `tools/epub2json.py` to generate `data/<slug>.json`, then optionally
 `tools/build_strongs.py` to add a Strong's correspondence (making them clickable
 reverse interlinears). The importer includes each if present and skips it if not:

@@ -118,6 +118,26 @@ impl Bible {
         Ok(Bible { conn })
     }
 
+    /// The bundled database together with the reader's imported translations
+    /// (see [`crate::personal::store`]), read as one.
+    ///
+    /// The imports database is attached, and temporary views named like the
+    /// tables put the two side by side. SQLite resolves an unqualified name
+    /// in `temp` first, so every query here reads both without knowing it.
+    /// Ids cannot collide: imported translations start at
+    /// [`crate::personal::store::FIRST_ID`]. Only the full-text index cannot
+    /// be shared this way, and [`Bible::search`] picks the right one.
+    pub fn open_with_imports(path: &Path, imports: &Path) -> rusqlite::Result<Bible> {
+        let bible = Bible::open(path)?;
+        bible.conn.execute("ATTACH DATABASE ?1 AS user", [imports.to_string_lossy()])?;
+        for table in ["translations", "books", "verses", "words"] {
+            bible.conn.execute_batch(&format!(
+                "CREATE TEMP VIEW {table} AS SELECT * FROM main.{table} UNION ALL SELECT * FROM user.{table};"
+            ))?;
+        }
+        Ok(bible)
+    }
+
     pub fn translations(&self) -> rusqlite::Result<Vec<Translation>> {
         let mut stmt = self
             .conn
@@ -303,16 +323,19 @@ impl Bible {
         if match_expr.is_empty() {
             return Ok(Vec::new());
         }
-        let mut stmt = self.conn.prepare(
+        // Each database indexes its own verses, and the index's rowids are
+        // its own verses' ids: an imported text is searched in its database.
+        let db = if translation_id >= crate::personal::store::FIRST_ID { "user" } else { "main" };
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT v.book, b.name, v.chapter, v.verse,
                     snippet(verses_fts, 0, char(57344), char(57345), '…', 16) AS snip
-             FROM verses_fts
-             JOIN verses v ON v.id = verses_fts.rowid
+             FROM {db}.verses_fts
+             JOIN {db}.verses v ON v.id = verses_fts.rowid
              JOIN books b ON b.translation_id = v.translation_id AND b.nr = v.book
              WHERE verses_fts MATCH ?1 AND v.translation_id = ?2
              ORDER BY v.book, v.chapter, v.verse
-             LIMIT ?3",
-        )?;
+             LIMIT ?3"
+        ))?;
         let rows = stmt.query_map(rusqlite::params![match_expr, translation_id, limit], |r| {
             Ok(SearchHit {
                 book: r.get(0)?,

@@ -35,6 +35,8 @@ shlibs="$(cd "$stage/shlibs" && dpkg-shlibdeps -O "$dest/usr/bin/leverbe" | sed 
 # cover Hebrew and Greek with their diacritics.
 runtime="libxkbcommon0, libxkbcommon-x11-0, libwayland-client0, libwayland-cursor0, libwayland-egl1, libx11-6, libx11-xcb1, libxcursor1, libxi6, libxrandr2, libegl1, libgl1, fonts-noto-core | fonts-dejavu-core"
 
+# The import card's file picker asks the desktop's portal over D-Bus; every
+# desktop install has one, hence only a recommendation.
 installed_size="$(du -sk "$dest" | cut -f1)"
 mkdir -p "$dest/DEBIAN"
 cat > "$dest/DEBIAN/control" <<CONTROL
@@ -46,12 +48,15 @@ Architecture: $arch
 Maintainer: LeVerbe <noreply@github.com>
 Installed-Size: $installed_size
 Depends: ${shlibs:+$shlibs, }$runtime
+Recommends: xdg-desktop-portal
 Homepage: https://github.com/rmpr/logos-rs
 Description: Bible study in the original languages
  LeVerbe is a desktop Bible study app: parallel translations, full-text and
  morphological search over the Hebrew Old Testament and Greek New Testament,
  a reader's edition with glosses for rare words, word study with Strong's
- lexicons and a reverse interlinear for KJV, ULT and Louis Segond.
+ lexicons and a reverse interlinear for KJV, ULT and Louis Segond. Bibles
+ you own can be imported from EPUB, PDF or DOCX and are linked to the Hebrew
+ and Greek the same way.
  .
  The complete Bible database is included; no network access is needed.
 CONTROL

@@ -1,4 +1,4 @@
-import { ComboBox, LineEdit, ScrollView, ListView, Palette } from "std-widgets.slint";
+import { ComboBox, LineEdit, ScrollView, ListView, Palette, ProgressIndicator } from "std-widgets.slint";
 
 // ---------------------------------------------------------------------------
 // Theme — all colours derive from a single `dark` switch.
@@ -17,6 +17,7 @@ export global Theme {
     out property <color> verse-num: dark ? #7d838d : #9aa0a6;
 
     out property <color> selection: dark ? #6ea8fe66 : #2563eb40;
+    out property <color> danger:    dark ? #f28b82 : #c5221f;
 
     /// Scale of the Bible text, set with Ctrl+plus / Ctrl+minus. The rest of
     /// the interface keeps its size.
@@ -1023,6 +1024,28 @@ export component MainWindow inherits Window {
     callback toggle-scroll-lock();
     callback toggle-advanced();
     callback zoom-changed();
+
+    // --- importing a translation from a file ---
+    in-out property <bool> show-import;
+    /// 0 choosing a file, 1 confirming what was read, 2 importing, 3 done.
+    in property <int> import-stage;
+    in property <[TranslationItem]> imported;
+    in property <string> import-file;
+    in property <string> import-summary;
+    in property <string> import-notes;
+    in property <string> import-error;
+    in property <string> import-progress-text;
+    in property <float> import-progress;
+    in-out property <string> import-name;
+    in-out property <string> import-code;
+    in-out property <string> import-lang;
+    /// The imported translation whose Remove was clicked once.
+    property <string> removing;
+    callback import-choose();
+    callback import-confirm();
+    callback import-reset();
+    callback import-open();
+    callback import-remove(string);
     callback threshold-changed(int);
 
     // The std-widgets (combo boxes, the search field) take their colours from
@@ -1140,6 +1163,14 @@ export component MainWindow inherits Window {
                             label: root.advanced ? "⌕ Advanced ✓" : "⌕ Advanced";
                             active: root.advanced;
                             clicked => { root.toggle-advanced(); }
+                        }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        Pill {
+                            label: "⇪ Import";
+                            active: root.show-import;
+                            clicked => { root.show-import = !root.show-import; }
                         }
                     }
                     // Four columns at most: beyond that a verse is a word or
@@ -1654,6 +1685,228 @@ export component MainWindow inherits Window {
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+            // ---------------- Importing a translation: a card over the page ----------------
+        if root.show-import: Rectangle {
+            background: #00000088;
+            // a click beside the card closes it, unless an import is running
+            TouchArea {
+                clicked => {
+                    if (root.import-stage != 2) {
+                        root.show-import = false;
+                    }
+                }
+            }
+            Rectangle {
+                // the window is never narrower than 720px
+                width: 600px;
+                height: card.preferred-height;
+                x: (parent.width - self.width) / 2;
+                y: 70px;
+                background: Theme.panel;
+                border-radius: 10px;
+                border-width: 1px;
+                border-color: Theme.border;
+                // clicks on the card stay on the card
+                TouchArea { }
+                card := VerticalLayout {
+                    padding: 20px;
+                    spacing: 12px;
+                    HorizontalLayout {
+                        Text {
+                            text: "Import a translation";
+                            color: Theme.text;
+                            font-size: 17px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        if root.import-stage != 2: Pill {
+                            label: "✕";
+                            clicked => { root.show-import = false; }
+                        }
+                    }
+
+                    // ---- 0: choose a file, or manage the imported ones ----
+                    if root.import-stage == 0: VerticalLayout {
+                        spacing: 12px;
+                        Text {
+                            text: "Bring in a Bible you own: an EPUB, a PDF, a Logos personal-book DOCX or a text file. Its words are linked to the Hebrew and Greek so they can be clicked like the others. It stays on this computer.";
+                            color: Theme.text;
+                            font-size: 13px;
+                            wrap: word-wrap;
+                            // A layout measures wrapped text at its own
+                            // preferred width, which an unwrapped line would
+                            // otherwise set: the card's inner width.
+                            preferred-width: 560px;
+                        }
+                        HorizontalLayout {
+                            alignment: start;
+                            Pill {
+                                label: "Choose a file…";
+                                active: true;
+                                clicked => { root.import-choose(); }
+                            }
+                        }
+                        if root.imported.length > 0: Text {
+                            text: "IMPORTED";
+                            color: Theme.muted;
+                            font-size: 10px;
+                            font-weight: 700;
+                        }
+                        // a fixed height: the card sizes itself to its content,
+                        // and rows a repeater adds are not counted otherwise
+                        for t in root.imported: row := Rectangle {
+                            height: 32px;
+                            property <bool> confirming: root.removing == t.code;
+                            HorizontalLayout {
+                                spacing: 10px;
+                                Text {
+                                    text: t.code;
+                                    width: 80px;
+                                    color: Theme.accent;
+                                    font-size: 13px;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: t.name;
+                                    color: Theme.text;
+                                    font-size: 13px;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                }
+                                // removing takes a second click: it cannot be undone
+                                Pill {
+                                    label: row.confirming ? "Remove — sure?" : "Remove";
+                                    active: row.confirming;
+                                    clicked => {
+                                        if (row.confirming) {
+                                            root.removing = "";
+                                            root.import-remove(t.code);
+                                        } else {
+                                            root.removing = t.code;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // ---- 1: what was read, and what to call it ----
+                    if root.import-stage == 1: VerticalLayout {
+                        spacing: 10px;
+                        Text {
+                            text: root.import-file;
+                            color: Theme.muted;
+                            font-size: 12px;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: root.import-summary;
+                            color: Theme.text;
+                            font-size: 14px;
+                            font-weight: 600;
+                            wrap: word-wrap;
+                            // A layout measures wrapped text at its own
+                            // preferred width, which an unwrapped line would
+                            // otherwise set: the card's inner width.
+                            preferred-width: 560px;
+                        }
+                        if root.import-notes != "": Text {
+                            text: root.import-notes;
+                            color: Theme.muted;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                            // A layout measures wrapped text at its own
+                            // preferred width, which an unwrapped line would
+                            // otherwise set: the card's inner width.
+                            preferred-width: 560px;
+                        }
+                        GridLayout {
+                            spacing: 8px;
+                            Row {
+                                Text { text: "Name"; color: Theme.muted; font-size: 12px; vertical-alignment: center; }
+                                LineEdit { text <=> root.import-name; }
+                            }
+                            Row {
+                                Text { text: "Code"; color: Theme.muted; font-size: 12px; vertical-alignment: center; }
+                                LineEdit { text <=> root.import-code; placeholder-text: "2 to 12 capitals, e.g. NASB"; }
+                            }
+                            Row {
+                                Text { text: "Language"; color: Theme.muted; font-size: 12px; vertical-alignment: center; }
+                                LineEdit { text <=> root.import-lang; placeholder-text: "en, fr, nb, de…"; }
+                            }
+                        }
+                        HorizontalLayout {
+                            alignment: end;
+                            spacing: 8px;
+                            Pill {
+                                label: "Cancel";
+                                clicked => { root.import-reset(); }
+                            }
+                            Pill {
+                                label: "Import";
+                                active: true;
+                                clicked => { root.import-confirm(); }
+                            }
+                        }
+                    }
+
+                    // ---- 2: importing ----
+                    if root.import-stage == 2: VerticalLayout {
+                        spacing: 10px;
+                        Text {
+                            text: root.import-progress-text;
+                            color: Theme.text;
+                            font-size: 13px;
+                        }
+                        // a negative progress: reading the file, length unknown
+                        ProgressIndicator {
+                            height: 6px;
+                            progress: max(0, root.import-progress);
+                            indeterminate: root.import-progress < 0;
+                        }
+                    }
+
+                    // ---- 3: done ----
+                    if root.import-stage == 3: VerticalLayout {
+                        spacing: 12px;
+                        Text {
+                            text: root.import-summary;
+                            color: Theme.text;
+                            font-size: 14px;
+                            wrap: word-wrap;
+                            // A layout measures wrapped text at its own
+                            // preferred width, which an unwrapped line would
+                            // otherwise set: the card's inner width.
+                            preferred-width: 560px;
+                        }
+                        HorizontalLayout {
+                            alignment: end;
+                            spacing: 8px;
+                            Pill {
+                                label: "Import another";
+                                clicked => { root.import-reset(); }
+                            }
+                            Pill {
+                                label: "Open in a new column";
+                                active: true;
+                                clicked => { root.import-open(); }
+                            }
+                        }
+                    }
+
+                    if root.import-error != "": Text {
+                        text: root.import-error;
+                        color: Theme.danger;
+                        font-size: 13px;
+                        wrap: word-wrap;
+                        preferred-width: 560px;
                     }
                 }
             }

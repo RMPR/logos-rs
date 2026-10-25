@@ -14,9 +14,21 @@ use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
 slint::include_modules!();
 
+mod import_ui;
+
 /// Mutable application state shared across UI callbacks (single-threaded).
 struct State {
     bible: Bible,
+    /// The bundled database, and the reader's imported translations (`None`
+    /// when no writable place for them could be found).
+    db: std::path::PathBuf,
+    imports: Option<std::path::PathBuf>,
+    /// The worker of the import card, if one has run.
+    import_rx: Option<std::sync::mpsc::Receiver<import_ui::Msg>>,
+    /// A file read and waiting for the reader to confirm its import.
+    pending_import: Option<(std::path::PathBuf, logos_rs::personal::Document)>,
+    /// The translation imported last, for "Open in a new column".
+    last_import: Option<i64>,
     translations: Vec<Translation>,
     /// The open columns, left to right, as indices into `translations`; never
     /// empty, at most `MAX_COLUMNS`. The first is the primary text: it sets
@@ -169,7 +181,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Building Bible database (one-time, ~10s, offline from bundled sources)…");
         logos_rs::importer::run()?;
     }
-    let bible = Bible::open(&db)?;
+    // Imported translations live in a database of their own; without one
+    // (no writable data directory) the app reads the bundled texts alone.
+    let imports = logos_rs::personal::store::path()
+        .filter(|p| logos_rs::personal::store::open(p).is_ok());
+    let bible = open_bible(&db, imports.as_deref())?;
     let translations = bible.translations()?;
     if translations.is_empty() {
         eprintln!("no translations in database");
@@ -205,6 +221,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let state = Rc::new(RefCell::new(State {
         bible,
+        db: db.clone(),
+        imports: imports.clone(),
+        import_rx: None,
+        pending_import: None,
+        last_import: None,
         translations,
         columns,
         primary_books,
@@ -231,13 +252,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let mut st = state.borrow_mut();
         let jobs = preload_jobs(&st);
-        let rx = spawn_preload(db.clone(), jobs, true);
+        let rx = spawn_preload(db.clone(), imports.clone(), jobs, true);
         st.loading.push(rx);
     }
     let poll = slint::Timer::default();
     {
         let state = state.clone();
+        let w = ui.as_weak();
         poll.start(slint::TimerMode::Repeated, std::time::Duration::from_millis(100), move || {
+            if let Some(ui) = w.upgrade() {
+                import_ui::poll(&ui, &state);
+            }
             let mut st = state.borrow_mut();
             let mut got = Vec::new();
             let mut done = Vec::new();
@@ -274,12 +299,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Static: translation labels for the combo boxes.
     {
         let st = state.borrow();
-        let labels: Vec<SharedString> = st
-            .translations
-            .iter()
-            .map(|t| format!("{} — {}", t.code, t.name).into())
-            .collect();
-        ui.set_translation_labels(ModelRc::new(VecModel::from(labels)));
+        import_ui::set_translation_lists(&ui, &st);
 
         let thresholds: Vec<SharedString> =
             THRESHOLDS.iter().map(|n| format!("fewer than {n}×").into()).collect();
@@ -289,6 +309,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     refresh_books(&ui, &state.borrow());
     refresh_reading(&ui, &state);
+
+    import_ui::connect(&ui, &state);
 
     // ---- callbacks ----
     // Each callback captures a weak UI handle and a clone of the shared state.
@@ -337,6 +359,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let (w, state) = ctx!();
         let db_for_preload = db.clone();
+        let imports_for_preload = imports.clone();
         ui.on_translation_changed(move |col, idx| {
             let ui = w.unwrap();
             let col = col as usize;
@@ -367,7 +390,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut st = state.borrow_mut();
                 let jobs = preload_jobs(&st);
                 if !jobs.is_empty() {
-                    let rx = spawn_preload(db_for_preload.clone(), jobs, false);
+                    let rx = spawn_preload(db_for_preload.clone(), imports_for_preload.clone(), jobs, false);
                     st.loading.push(rx);
                 }
             }
@@ -650,6 +673,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     ui.run()?;
     Ok(())
+}
+
+/// The bundled database with the imported translations, or alone if the
+/// imports cannot be attached.
+fn open_bible(db: &std::path::Path, imports: Option<&std::path::Path>) -> rusqlite::Result<Bible> {
+    match imports {
+        Some(p) => Bible::open_with_imports(db, p).or_else(|_| Bible::open(db)),
+        None => Bible::open(db),
+    }
 }
 
 /// Put the window back the way it was left, before the first refresh reads
@@ -1190,12 +1222,13 @@ enum Preloaded {
 /// back over a channel the UI thread drains on a timer.
 fn spawn_preload(
     db: std::path::PathBuf,
+    imports: Option<std::path::PathBuf>,
     jobs: Vec<(i64, bool)>,
     lexicon: bool,
 ) -> std::sync::mpsc::Receiver<Preloaded> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let Ok(bible) = Bible::open(&db) else { return };
+        let Ok(bible) = open_bible(&db, imports.as_deref()) else { return };
         if lexicon && let Ok(rows) = bible.lexicon_rows() {
             let _ = tx.send(Preloaded::Lexicon(Lexicon::new(rows)));
         }
