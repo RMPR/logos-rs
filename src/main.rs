@@ -704,11 +704,10 @@ fn refresh_reading(ui: &MainWindow, state: &Rc<RefCell<State>>) {
 
     let primary_rows: Vec<VerseRow>;
     if st.translations[primary].tagged {
-        let budget = if parallel { 32 } else { 60 };
         let max_freq = THRESHOLDS[st.threshold_idx.min(THRESHOLDS.len() - 1)];
         let reader = reader_on.then(|| Reader { freq: &st.freq, max_freq });
         let (rows, flat) =
-            tagged_rows(&st.bible, pid, book, chapter, primary_rtl, budget, reader.as_ref());
+            tagged_rows(&st.bible, pid, book, chapter, primary_rtl, reader.as_ref());
         primary_rows = rows;
         if let Some(r) = &reader {
             let notes = gloss_notes(&flat, r, primary_rtl);
@@ -736,7 +735,7 @@ fn refresh_reading(ui: &MainWindow, state: &Rc<RefCell<State>>) {
         // nothing to lay out when the second column is not on screen
         st.secondary_words.clear();
     } else if st.translations[secondary].tagged {
-        let (rows, flat) = tagged_rows(&st.bible, sid, book, chapter, secondary_rtl, 32, None);
+        let (rows, flat) = tagged_rows(&st.bible, sid, book, chapter, secondary_rtl, None);
         st.secondary_words = flat;
         secondary_rows = rows;
     } else {
@@ -778,22 +777,15 @@ fn refresh_reading(ui: &MainWindow, state: &Rc<RefCell<State>>) {
     save_session(ui, &st);
 }
 
-/// Display width of a word, ignoring Hebrew points / Greek combining accents.
-fn display_width(s: &str) -> usize {
-    s.chars()
-        .filter(|c| !('\u{0300}'..='\u{036F}').contains(c) && !('\u{0591}'..='\u{05C7}').contains(c))
-        .count()
-}
-
-/// Build wrapped word rows for a tagged translation, plus the flat word list
-/// (indexed by the chip `idx` used for click lookups).
+/// Build word rows for a tagged translation, plus the flat word list (indexed
+/// by the chip `idx` used for click lookups). The view wraps the words to the
+/// column's width.
 fn tagged_rows(
     bible: &Bible,
     tid: i64,
     book: i64,
     chapter: i64,
     rtl: bool,
-    budget: usize,
     reader: Option<&Reader>,
 ) -> (Vec<VerseRow>, Vec<Word>) {
     let verses = bible.chapter(tid, book, chapter).unwrap_or_default();
@@ -803,44 +795,26 @@ fn tagged_rows(
     for v in &verses {
         let words = bible.words(tid, book, chapter, v.verse).unwrap_or_default();
         let base = flat.len();
-        // greedy line wrapping
-        let mut lines: Vec<WordLine> = Vec::new();
-        let mut cur: Vec<WordChip> = Vec::new();
-        let mut width = 0usize;
-        for (i, w) in words.iter().enumerate() {
-            let ww = display_width(&w.text) + 1;
-            if width + ww > budget && !cur.is_empty() {
-                lines.push(make_line(std::mem::take(&mut cur), rtl));
-                width = 0;
-            }
-            cur.push(WordChip {
+        let chips: Vec<WordChip> = words
+            .iter()
+            .enumerate()
+            .map(|(i, w)| WordChip {
                 idx: (base + i) as i32,
                 text: w.text.clone().into(),
                 tagged: !w.strongs.is_empty(),
                 rare: reader.is_some_and(|r| r.glosses(w)),
-            });
-            width += ww;
-        }
-        if !cur.is_empty() {
-            lines.push(make_line(cur, rtl));
-        }
+            })
+            .collect();
         flat.extend(words);
         blocks.push(VerseRow {
             verse: v.verse as i32,
             text: SharedString::default(),
-            lines: ModelRc::new(VecModel::from(lines)),
+            words: ModelRc::new(VecModel::from(chips)),
             tagged: true,
             rtl,
         });
     }
     (blocks, flat)
-}
-
-fn make_line(mut chips: Vec<WordChip>, rtl: bool) -> WordLine {
-    if rtl {
-        chips.reverse(); // right-to-left reading order within the line
-    }
-    WordLine { words: ModelRc::new(VecModel::from(chips)) }
 }
 
 /// The reader's-edition apparatus for one chapter: every lexeme rarer than the
@@ -958,7 +932,7 @@ fn plain_rows(verses: &[bible::Verse], rtl: bool) -> Vec<VerseRow> {
         .map(|v| VerseRow {
             verse: v.verse as i32,
             text: v.text.clone().into(),
-            lines: ModelRc::new(VecModel::default()),
+            words: ModelRc::new(VecModel::default()),
             tagged: false,
             rtl,
         })

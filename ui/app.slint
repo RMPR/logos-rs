@@ -199,19 +199,17 @@ export struct SearchItem {
     book: int, chapter: int, verse: int,
 }
 
-// Word-level (tagged original-language) structures. Verses are pre-wrapped
-// into lines on the Rust side (Slint has no flow layout).
+// A word of a tagged verse; `idx` indexes the chapter's flat word list.
 export struct WordChip { idx: int, text: string, tagged: bool, rare: bool }
-export struct WordLine { words: [WordChip] }
 
 // One row of a reading column. A row is either plain prose (`text`) or a
-// sequence of clickable, morphology-tagged words (`lines`) — never both.
+// sequence of clickable, morphology-tagged words (`words`) — never both.
 // Both kinds share one model so that a column is a single ListView, which is
 // what lets the two columns lock their scroll positions to each other.
 export struct VerseRow {
     verse: int,
     text: string,
-    lines: [WordLine],
+    words: [WordChip],
     tagged: bool,
     rtl: bool,
 }
@@ -329,6 +327,17 @@ component VerseCell inherits Rectangle {
 
     property <bool> marked: Passage.is-marked(root.column, root.verse-row.verse);
 
+    property <length> pad-x: 14px;
+    property <length> pad-y: root.verse-row.tagged ? 5px : 4px;
+    property <length> number-width: root.verse-row.tagged ? 26px : 30px;
+    property <length> gap: root.verse-row.tagged ? 8px : 10px;
+    property <bool> trailing-number: root.verse-row.tagged && root.verse-row.rtl;
+    property <length> body-x: root.pad-x + (root.trailing-number ? 0px : root.number-width + root.gap);
+    property <length> body-width: max(0px, root.width - 2 * root.pad-x - root.number-width - root.gap);
+    property <length> body-height: root.verse-row.tagged ? words.preferred-height : prose.preferred-height;
+    preferred-height: root.body-height + 2 * root.pad-y;
+    min-height: self.preferred-height;
+
     // a line the wrap budget mis-sized must not run across the divider
     clip: true;
 
@@ -367,157 +376,160 @@ component VerseCell inherits Rectangle {
             }
         }
 
-        HorizontalLayout {
-            padding: root.verse-row.tagged ? 5px : 4px;
-            padding-left: 14px;
-            padding-right: 14px;
-            spacing: root.verse-row.tagged ? 8px : 10px;
+        // Placed by hand rather than by a HorizontalLayout. A layout asks its
+        // children for their height at their *preferred* width, and Slint
+        // guesses a wrapping flex's preferred width as a squarish block, so
+        // the words would be measured wrapped into a narrow column and the
+        // row would come out several lines too tall. Here the body is given
+        // its real width first and the cell takes the body's height at it.
 
-            // verse number — leading, except for right-to-left word rows
-            if root.verse-row.verse > 0 && (!root.verse-row.tagged || !root.verse-row.rtl): VerseNumber {
-                verse: root.verse-row.verse;
-                column: root.column;
-                tagged: root.verse-row.tagged;
-                menu-requested(x, y) => { root.show-menu(x, y); }
-            }
+        // verse number — leading, except after right-to-left words
+        if root.verse-row.verse > 0: VerseNumber {
+            x: root.trailing-number ? root.body-x + root.body-width + root.gap : root.pad-x;
+            y: root.pad-y;
+            width: root.number-width;
+            height: root.body-height;
+            verse: root.verse-row.verse;
+            column: root.column;
+            tagged: root.verse-row.tagged;
+            alignment: root.trailing-number ? left : right;
+            menu-requested(x, y) => { root.show-menu(x, y); }
+        }
 
-            // In a paired row the shorter side is given the taller side's
-            // height; the text must sit at the top of that space, not be
-            // spread through it — hence top alignment here and
-            // `alignment: start` below. The text has a menu of its own, to
-            // copy what is selected in it.
-            if !root.verse-row.tagged: ContextMenuArea {
-                horizontal-stretch: 1;
-                Menu {
-                    MenuItem {
-                        title: "Copy";
-                        activated => { prose.copy(); }
-                    }
-                    MenuItem {
-                        title: "Copy verse";
-                        activated => { Passage.copy-verses(root.column, root.verse-row.verse, root.verse-row.verse); }
-                    }
-                    MenuItem {
-                        title: "Copy marked verses";
-                        enabled: Passage.column >= 0;
-                        activated => { Passage.copy-selection(); }
-                    }
-                    MenuItem {
-                        title: "Copy chapter";
-                        activated => { Passage.copy-verses(root.column, 0, 0); }
-                    }
+        // Prose. In a paired row the shorter side is given the taller side's
+        // height; the text sits at the top of that space. It has a menu of
+        // its own, to copy what is selected in it.
+        ContextMenuArea {
+            visible: !root.verse-row.tagged;
+            enabled: !root.verse-row.tagged;
+            x: root.body-x;
+            y: root.pad-y;
+            width: root.body-width;
+            height: prose.preferred-height;
+            Menu {
+                MenuItem {
+                    title: "Copy";
+                    activated => { prose.copy(); }
                 }
-                prose := SelectableText {
-                    text: root.verse-row.text;
-                    font-size: Theme.reading-size;
-                    wrap: word-wrap;
-                    horizontal-alignment: root.verse-row.rtl ? right : left;
-                    vertical-alignment: top;
+                MenuItem {
+                    title: "Copy verse";
+                    activated => { Passage.copy-verses(root.column, root.verse-row.verse, root.verse-row.verse); }
                 }
-            }
-
-            if root.verse-row.tagged: VerticalLayout {
-                horizontal-stretch: 1;
-                spacing: 2px;
-                alignment: start;
-                for line in root.verse-row.lines: HorizontalLayout {
-                    spacing: 3px;
-                    alignment: root.verse-row.rtl ? end : start;
-                    for w in line.words: Rectangle {
-                        // Whether a dragging pointer is over this word. The
-                        // change handler evaluates it as the chapter is
-                        // built, before layout has placed anything, so the
-                        // geometry must not be read unless a drag is on. An
-                        // `&&` chain is not enough: the compiler hoists the
-                        // position read above it. An early return is.
-                        pure function under-pointer() -> bool {
-                            if (!Passage.dragging || Passage.word-column != root.column) {
-                                return false;
-                            }
-                            let pos = self.absolute-position;
-                            Passage.pointer-x >= pos.x && Passage.pointer-x < pos.x + self.width
-                                && Passage.pointer-y >= pos.y && Passage.pointer-y < pos.y + self.height
-                        }
-                        property <bool> under: self.under-pointer();
-                        changed under => {
-                            if (self.under) {
-                                Passage.reach(root.column, w.idx);
-                            }
-                        }
-
-                        property <bool> in-selection: Passage.is-selected(root.column, w.idx);
-                        border-radius: 4px;
-                        background: self.in-selection
-                            ? transparent
-                            : (root.column == root.selected-col && w.idx == root.selected-idx)
-                                ? Theme.accent-bg
-                                : (wtouch.has-hover && !Passage.dragging ? Theme.panel-alt : transparent);
-                        // A selection reads as one run, so its tint spans the
-                        // gaps between words (half the line's spacing a side).
-                        Rectangle {
-                            x: -1.5px;
-                            width: parent.width + 3px;
-                            background: parent.in-selection ? Theme.selection : transparent;
-                        }
-                        HorizontalLayout {
-                            padding: 1px;
-                            padding-left: 3px;
-                            padding-right: 3px;
-                            Text {
-                                text: w.text;
-                                font-size: Theme.reading-size;
-                                color: w.tagged ? Theme.text : Theme.muted;
-                            }
-                        }
-                        // Reader's edition: a rule under the words the
-                        // apparatus below glosses. Slint has no text
-                        // underline, so it is drawn.
-                        if w.rare: Rectangle {
-                            x: 2px;
-                            y: parent.height - 2px;
-                            width: parent.width - 4px;
-                            height: 1px;
-                            background: Theme.accent;
-                        }
-                        // Press starts a selection; dragging extends it; a
-                        // release that never left the word is a click, which
-                        // opens the word study.
-                        wtouch := TouchArea {
-                            pointer-event(e) => {
-                                if (e.button == PointerEventButton.left && e.kind == PointerEventKind.down) {
-                                    Passage.press(root.column, w.idx,
-                                        self.absolute-position.x + self.mouse-x,
-                                        self.absolute-position.y + self.mouse-y);
-                                } else if (e.button == PointerEventButton.left && e.kind == PointerEventKind.up) {
-                                    if (Passage.release()) {
-                                        root.pick(root.column, w.idx);
-                                    }
-                                } else if (e.button == PointerEventButton.right && e.kind == PointerEventKind.down) {
-                                    root.show-menu(self.absolute-position.x + self.mouse-x,
-                                        self.absolute-position.y + self.mouse-y);
-                                } else if (e.kind == PointerEventKind.cancel) {
-                                    // the press was taken away (focus lost):
-                                    // keep what was selected, never a click
-                                    Passage.release();
-                                }
-                            }
-                            moved => {
-                                if (self.pressed) {
-                                    Passage.drag(self.absolute-position.x + self.mouse-x,
-                                        self.absolute-position.y + self.mouse-y);
-                                }
-                            }
-                        }
-                    }
+                MenuItem {
+                    title: "Copy marked verses";
+                    enabled: Passage.column >= 0;
+                    activated => { Passage.copy-selection(); }
+                }
+                MenuItem {
+                    title: "Copy chapter";
+                    activated => { Passage.copy-verses(root.column, 0, 0); }
                 }
             }
+            prose := SelectableText {
+                text: root.verse-row.text;
+                font-size: Theme.reading-size;
+                wrap: word-wrap;
+                horizontal-alignment: root.verse-row.rtl ? right : left;
+                vertical-alignment: top;
+            }
+        }
 
-            if root.verse-row.verse > 0 && root.verse-row.tagged && root.verse-row.rtl: VerseNumber {
-                verse: root.verse-row.verse;
-                column: root.column;
-                tagged: true;
-                alignment: left;
-                menu-requested(x, y) => { root.show-menu(x, y); }
+        // Tagged words, wrapping to the column: a flex row, reversed for
+        // right-to-left scripts so lines fill from the right.
+        words := FlexboxLayout {
+            visible: root.verse-row.tagged;
+            x: root.body-x;
+            y: root.pad-y;
+            width: root.body-width;
+            height: self.preferred-height;
+            flex-direction: root.verse-row.rtl ? FlexboxLayoutDirection.row-reverse : FlexboxLayoutDirection.row;
+            spacing-horizontal: 3px;
+            spacing-vertical: 2px;
+            for w in root.verse-row.words: Rectangle {
+                // Whether a dragging pointer is over this word. The
+                // change handler evaluates it as the chapter is
+                // built, before layout has placed anything, so the
+                // geometry must not be read unless a drag is on. An
+                // `&&` chain is not enough: the compiler hoists the
+                // position read above it. An early return is.
+                pure function under-pointer() -> bool {
+                    if (!Passage.dragging || Passage.word-column != root.column) {
+                        return false;
+                    }
+                    let pos = self.absolute-position;
+                    Passage.pointer-x >= pos.x && Passage.pointer-x < pos.x + self.width
+                        && Passage.pointer-y >= pos.y && Passage.pointer-y < pos.y + self.height
+                }
+                property <bool> under: self.under-pointer();
+                changed under => {
+                    if (self.under) {
+                        Passage.reach(root.column, w.idx);
+                    }
+                }
+
+                property <bool> in-selection: Passage.is-selected(root.column, w.idx);
+                border-radius: 4px;
+                background: self.in-selection
+                    ? transparent
+                    : (root.column == root.selected-col && w.idx == root.selected-idx)
+                        ? Theme.accent-bg
+                        : (wtouch.has-hover && !Passage.dragging ? Theme.panel-alt : transparent);
+                // A selection reads as one run, so its tint spans the
+                // gaps between words (half the line's spacing a side).
+                Rectangle {
+                    x: -1.5px;
+                    width: parent.width + 3px;
+                    background: parent.in-selection ? Theme.selection : transparent;
+                }
+                HorizontalLayout {
+                    padding: 1px;
+                    padding-left: 3px;
+                    padding-right: 3px;
+                    Text {
+                        text: w.text;
+                        font-size: Theme.reading-size;
+                        color: w.tagged ? Theme.text : Theme.muted;
+                    }
+                }
+                // Reader's edition: a rule under the words the
+                // apparatus below glosses. Slint has no text
+                // underline, so it is drawn.
+                if w.rare: Rectangle {
+                    x: 2px;
+                    y: parent.height - 2px;
+                    width: parent.width - 4px;
+                    height: 1px;
+                    background: Theme.accent;
+                }
+                // Press starts a selection; dragging extends it; a
+                // release that never left the word is a click, which
+                // opens the word study.
+                wtouch := TouchArea {
+                    pointer-event(e) => {
+                        if (e.button == PointerEventButton.left && e.kind == PointerEventKind.down) {
+                            Passage.press(root.column, w.idx,
+                                self.absolute-position.x + self.mouse-x,
+                                self.absolute-position.y + self.mouse-y);
+                        } else if (e.button == PointerEventButton.left && e.kind == PointerEventKind.up) {
+                            if (Passage.release()) {
+                                root.pick(root.column, w.idx);
+                            }
+                        } else if (e.button == PointerEventButton.right && e.kind == PointerEventKind.down) {
+                            root.show-menu(self.absolute-position.x + self.mouse-x,
+                                self.absolute-position.y + self.mouse-y);
+                        } else if (e.kind == PointerEventKind.cancel) {
+                            // the press was taken away (focus lost):
+                            // keep what was selected, never a click
+                            Passage.release();
+                        }
+                    }
+                    moved => {
+                        if (self.pressed) {
+                            Passage.drag(self.absolute-position.x + self.mouse-x,
+                                self.absolute-position.y + self.mouse-y);
+                        }
+                    }
+                }
             }
         }
     }
@@ -532,7 +544,7 @@ component VerseCell inherits Rectangle {
 // height estimate and recycles row instances, so there is no way to put a
 // given row at the top for certain — a search hit would land a verse or two
 // off. With a real layout each row's `y` is exact and stable, and landing on a
-// verse is simply `viewport-y = -y`.
+// verse is simply `content-y = -y`.
 //
 // Rows publish their `y` when the layout assigns it; the timer reads it a
 // moment later, once layout has run.
@@ -563,13 +575,13 @@ component VerseScroller inherits Rectangle {
             return;
         }
         // never past the end: the last verses cannot reach the top
-        list.viewport-y = max(-y, list.visible-height - list.viewport-height);
+        list.content-y = max(-y, list.visible-height - list.content-height);
         root.seeking = false;
     }
 
     property <int> epoch-watch: root.nav-epoch;
     changed epoch-watch => {
-        list.viewport-y = 0px;
+        list.content-y = 0px;
         root.seeking = root.target-index >= 0;
     }
     // Created with a target already set (the locked/unlocked views swapping):
@@ -591,8 +603,8 @@ component VerseScroller inherits Rectangle {
         // The Flickable does not size its viewport from a layout placed here
         // through @children, so bind it: the content is exactly as tall as
         // the rows, and no wider than the view (so prose wraps to it).
-        viewport-width: self.visible-width;
-        viewport-height: body.preferred-height;
+        content-width: self.visible-width;
+        content-height: body.preferred-height;
         body := VerticalLayout {
             width: list.visible-width;
             @children
@@ -1303,15 +1315,15 @@ export component MainWindow inherits Window {
                         }
                         // Sizes to fit all chapters; caps and scrolls only when the
                         // grid would get too tall (e.g. Psalms' 150 chapters).
-                        // viewport-height must be set explicitly: the cells are
+                        // content-height must be set explicitly: the cells are
                         // absolutely positioned, so the ScrollView can't infer it.
                         csv := ScrollView {
                             property <int> cols: 7;
                             property <length> cell: 34px;
                             property <length> content-h: Math.ceil(root.chapters.length / self.cols) * self.cell;
                             visible: root.chapters.length > 0;
-                            viewport-width: self.cols * self.cell;
-                            viewport-height: self.content-h;
+                            content-width: self.cols * self.cell;
+                            content-height: self.content-h;
                             height: Math.min(self.content-h + 2px, 300px);
                             for ch[i] in root.chapters: Rectangle {
                                 x: Math.mod(i, csv.cols) * csv.cell;
@@ -1373,7 +1385,7 @@ export component MainWindow inherits Window {
                             // back to the top for a new search only; coming
                             // back from a hit keeps the place
                             property <int> search-watch: root.search-epoch;
-                            changed search-watch => { self.viewport-y = 0px; }
+                            changed search-watch => { self.content-y = 0px; }
                             for r[i] in root.results: Rectangle {
                                 height: rlayout.preferred-height;
                                 background: rtouch.has-hover ? Theme.panel : transparent;
