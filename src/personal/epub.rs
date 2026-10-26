@@ -1,7 +1,7 @@
 //! Bibles in EPUB.
 //!
 //! Publishers mark verses each their own way. Three layouts are read exactly,
-//! as `tools/epub2json.py` read them before this importer existed:
+//! as the former `tools/epub2json.py` read them:
 //!
 //! - **Crossway (ESV)**: `bNN.….text.html` files, book from the file name,
 //!   `span.chapter-num` / `span.verse-num` markers, footnotes and
@@ -47,6 +47,26 @@ const OSIS: &[&str] = &[
     "Eph", "Phil", "Col", "1Thess", "2Thess", "1Tim", "2Tim", "Titus", "Phlm", "Heb", "Jas",
     "1Pet", "2Pet", "1John", "2John", "3John", "Jude", "Rev",
 ];
+
+/// The publisher whose layout an EPUB has, if it is one read exactly:
+/// "Crossway", "Société biblique française" or "Bibelselskapet".
+pub fn publisher(path: &Path) -> Option<&'static str> {
+    let zip = zip::ZipArchive::new(std::fs::File::open(path).ok()?).ok()?;
+    let names: Vec<String> = zip.file_names().filter_map(|n| n.ok().map(|n| n.into_owned())).collect();
+    let count = |re: &str| {
+        let re = Regex::new(re).unwrap();
+        names.iter().filter(|n| re.is_match(n)).count()
+    };
+    if count(r"/b(\d{2})\.\d+\.[^/]*\.text\.html$") > 0 {
+        Some("Crossway")
+    } else if count(r"(?:^|/)[A-Za-z0-9]+-\d+\.xml$") > 50 {
+        Some("Société biblique française")
+    } else if count(r"(?:^|/)\d{3}[A-Z0-9]+(?:-[A-Z])?\.xhtml$") > 50 {
+        Some("Bibelselskapet")
+    } else {
+        None
+    }
+}
 
 pub fn read(path: &Path, books: &BookMatcher) -> Result<Document, Error> {
     let mut zip = zip::ZipArchive::new(std::fs::File::open(path)?)
@@ -207,8 +227,11 @@ fn element_text(e: &ElementRef) -> String {
     e.text().collect()
 }
 
+/// The first number in a marker: "12" → 12, and a merged range "11–12" →
+/// 11 (the verse it is filed under), never 1112.
 fn number_in(text: &str) -> Option<i64> {
-    let digits: String = text.chars().filter(char::is_ascii_digit).collect();
+    let digits: String =
+        text.chars().skip_while(|c| !c.is_ascii_digit()).take_while(char::is_ascii_digit).collect();
     digits.parse().ok()
 }
 
@@ -486,6 +509,14 @@ fn walk_generic(e: ElementRef, parser: &mut Parser) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn verse_markers() {
+        assert_eq!(super::number_in("12"), Some(12));
+        assert_eq!(super::number_in("\u{a0}11–12 "), Some(11));
+        assert_eq!(super::number_in("v. 3"), Some(3));
+        assert_eq!(super::number_in("A"), None);
+    }
+
     #[test]
     fn hrefs_decode() {
         assert_eq!(super::percent_decode("Text/My%20Bible%C3%A9.xhtml"), "Text/My Bibleé.xhtml");

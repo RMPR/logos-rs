@@ -90,33 +90,63 @@ words to the Hebrew and Greek a few seconds more.
 | DOCX | Logos personal-book milestones (`[[@Bible:Gen 1:1]]`, with `{{field-on:bible}}…{{field-off:bible}}` fences); without them, read as plain text a paragraph a line. |
 | Text | As a PDF. |
 
-Words are linked by the same statistical alignment that built the bundled
-Louis Segond, ESV, BFC and Bokmål correspondences (IBM Model 1 against the
-Strong's numbers of WLC and SBLGNT, verse by verse): typically 35–45% of a
-translation's words get a number, the content words that carry one. Only
-import texts you are entitled to use.
+Its words are then linked to the Hebrew and Greek like every text's (see
+[How words are linked](#how-words-are-linked)). Only import texts you are
+entitled to use. Imports made before an improvement of the linking are linked
+again, in the background, the next time the app starts.
+
+## How words are linked
+
+Every word of every translation — the KJV, ULT, Louis Segond, ESV, BFC,
+Bokmål, the Septuagint, the Vulgate and your imports — is linked to the Hebrew
+or Greek word it renders, so a click opens that word's study. Where people
+tagged a text (the KJV's Strong's numbers, the ULT's alignment) their tagging
+is kept and only the words it leaves untagged are filled in.
+
+- **Verses are matched by content, not number.** The Hebrew counts a psalm's
+  title as verse 1, Malachi 4 is its 3:19–24, the Septuagint joins Psalms 9 and
+  10, translations print two verses as one. STEPBible's versification table
+  (TVTMS) is evaluated against each Bible's own verses to work out its
+  numbering tradition, without being told it; an original verse no verse of
+  the translation claims (a title printed in verse 1, a "9–10") goes to the
+  neighbour whose length it explains. The linked parallel view rows up verses
+  the same way: the KJV's Psalm 3:1 sits beside the Septuagint's 1–2.
+- **Words are aligned with the fast_align model** (Dyer et al., 2013), trained
+  in both directions over the whole Bible: words compared by stem (Snowball for
+  English, French, Norwegian…, a Schinke stemmer for Latin, a light Koine one
+  for Greek), a preference for words at the same place in the verse, sparse
+  (variational-Bayes) estimates, and links the two directions agree on. Against
+  the KJV's own Strong's tagging, re-aligning its text gets 86% of the tagged
+  words right (the IBM Model 1 used before: 59%).
+- **Text with no original** — the Greek additions to Esther and Daniel, the
+  Septuagint's own books — is linked by what its words mean elsewhere in the
+  same translation, and Greek words by their lexeme: the SBLGNT's tagged forms
+  and STEPBible's extended Strong's numbers for the Septuagint's vocabulary.
+
+Coverage of the bundled texts: 100% of words for all but the Septuagint, which
+is at 99.8% — the rest are names and rare words of its deuterocanonical books
+(Holofernes, Bethulia…) that no lexicon here knows.
 
 ## Translations & data sources
 
-The five bundled translations:
+The bundled translations:
 
 | Code | Translation | Language | Tagged | Source / notes |
 |------|-------------|----------|:------:|----------------|
 | KJV  | King James Version | English | ✓ | [bolls.life](https://bolls.life/) KJV (1769) with Strong's numbers — public domain; clickable reverse interlinear |
 | ULT  | unfoldingWord Literal Text | English | ✓ | [unfoldingWord ULT](https://git.door43.org/unfoldingWord/en_ult) — every word aligned to the original Hebrew/Greek with Strong's (CC BY-SA); powers the reverse interlinear |
-| LSG  | Louis Segond (1910) | French | ✓ | public-domain Segond + a Strong's correspondence **built by statistical word-alignment** (`tools/build_lsg_strongs.py`); clickable reverse interlinear |
+| LSG  | Louis Segond (1910) | French | ✓ | public-domain Segond; words linked by the aligner; clickable reverse interlinear |
 | WLC  | Westminster Leningrad Codex | Hebrew (OT) | ✓ | [OpenScriptures morphhb](https://github.com/openscriptures/morphhb) — the open Leningrad text BHS is based on, with per-word lemma + OSHM morphology |
 | SBLGNT | SBL Greek New Testament | Greek (NT) | ✓ | [MorphGNT](https://github.com/morphgnt/sblgnt) — per-word parse code + lemma |
-| LXX  | Septuagint | Greek (OT) | | getbible.net — includes deuterocanonical books |
-| VUL  | Vulgata Clementina | Latin | | getbible.net — 66 canonical books only (deuterocanon dropped); shown as the Latin reference in the word-study panel |
+| LXX  | Septuagint | Greek (OT) | ✓ | getbible.net — includes deuterocanonical books; words linked to the Hebrew they render, those of its own books to their Greek lexeme |
+| VUL  | Vulgata Clementina | Latin | ✓ | getbible.net — 66 canonical books only (deuterocanon dropped); words linked by the aligner |
 
 Optional, **user-provided** translations built into `bible.db` itself
 (copyrighted — supplied by the user from licensed EPUBs, **not committed** to
-the repo). For your own use, importing them in the app does the same with no
-tools; for a build that bundles them, place the EPUBs and run
-`tools/epub2json.py` to generate `data/<slug>.json`, then optionally
-`tools/build_strongs.py` to add a Strong's correspondence (making them clickable
-reverse interlinears). The importer includes each if present and skips it if not:
+the repo). For your own use, importing them in the app does the same; for a
+build that bundles them, place the publishers' EPUBs in `data/` (they are
+recognised by their layout, whatever their file names) before building the
+database. The importer includes each if present and skips it if not:
 
 | Code | Translation | Language | From |
 |------|-------------|----------|------|
@@ -124,8 +154,8 @@ reverse interlinears). The importer includes each if present and skips it if not
 | BFC  | Bible en français courant | French | `…français courant…Collectif.epub` (deuterocanon + notes stripped) |
 | NB   | Bibelen 2011 (Bokmål) | Norwegian | `Bibelen - bokmal - Bibelselskapet.epub` |
 
-All three also get a **built Strong's correspondence** (`tools/build_strongs.py`),
-so they're clickable reverse interlinears when present.
+Their words are linked like every text's, so they're clickable reverse
+interlinears when present.
 
 "Tagged" translations carry word-level data: WLC/SBLGNT have full morphology;
 ULT carries each English word's Strong's number (normalised to match WLC/SBLGNT,
@@ -133,6 +163,13 @@ so an English click resolves to the actual original word in the verse).
 Definitions come from the OpenScriptures **Strong's lexicons** (Hebrew XML + Greek
 JSON). Greek lemmas are bridged to Strong's numbers by accent-insensitive matching
 (≈98% of NT words resolve). Hebrew lemmas are Strong's numbers directly.
+
+Two datasets from [STEPBible](https://www.STEPBible.org) (Tyndale House
+Cambridge, CC BY 4.0) are vendored under `data/`: **TVTMS**, the versification
+traditions table that matches verses across Bibles (`data/tvtms.txt.gz`), and
+**TBESG**, the brief lexicon of extended Strong's numbers for Greek, which
+names the Septuagint's words and gives them definitions
+(`data/lexicon/tbesg.txt.gz`).
 
 Book numbering is aligned across translations using a canonical book id
 (1–39 OT, 40–66 NT), so parallel view and cross-translation word lookup line up.
@@ -192,23 +229,15 @@ Database tables: `translations`, `books`, `verses` (+ `verses_fts`),
 
 ## Known limitations / TODO
 
-- **Some Strong's correspondences are statistical**: where no Strong's-tagged
-  edition exists (Louis Segond, ESV), the correspondence is *built* by IBM-Model-1
-  word alignment (translation ↔ the Strong's in each verse from WLC/SBLGNT). Content
-  words align well; some words are left untagged or occasionally mis-attached.
-  Regenerate with `tools/build_strongs.py <db> <CODE> <out.json>`; for the
-  EPUB-derived texts add `--source data/<slug>.json` (the output of
-  `tools/epub2json.py`), since they enter the database only through this
-  script's output.
-- **LXX reverse lookup is verse-level**: no open, license-clean Septuagint is
-  word-aligned to the Hebrew or carries Strong's, so an OT English click shows the
-  precise Hebrew word but the LXX as the whole parallel verse (not the single Greek
-  word). Word-level LXX alignment can follow if suitable data appears.
+- **Most links are statistical**: outside the KJV's and ULT's own tagging,
+  words are linked by the aligner. Content words link well (86% agreement with
+  the KJV's tagging); function words go to the original word nearest in sense
+  and place, as in a printed reverse interlinear, and some links are wrong.
+- **The Septuagint's own books** keep about 1,400 words unlinked: names and
+  rare words no bundled lexicon has an entry for.
 - **Hebrew search**: FTS5's `remove_diacritics` strips Greek accents but not Hebrew
   vowel points/cantillation, so unpointed Hebrew searches don't match yet. Planned
   fix: index a points-stripped copy of the Hebrew text (the `words` lemmas now make
   this straightforward).
-- Word lines in tagged texts are wrapped using a character-width estimate (Slint has
-  no flow layout), so they don't reflow on window resize.
 - No cross-references, notes, or highlighting yet.
 - The database is generated locally rather than bundled.

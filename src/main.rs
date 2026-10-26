@@ -10,7 +10,8 @@ use logos_rs::canon::Section;
 use logos_rs::reference;
 use logos_rs::search::{self, Corpus, Lexicon, VerseId};
 use logos_rs::session::{self, Session};
-use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
+use logos_rs::versification::{Ref, Shape, VerseMap};
+use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 slint::include_modules!();
 
@@ -25,10 +26,16 @@ struct State {
     imports: Option<std::path::PathBuf>,
     /// The worker of the import card, if one has run.
     import_rx: Option<std::sync::mpsc::Receiver<import_ui::Msg>>,
+    /// The worker linking old imports again, at start-up.
+    relink_rx: Option<std::sync::mpsc::Receiver<import_ui::Msg>>,
     /// A file read and waiting for the reader to confirm its import.
     pending_import: Option<(std::path::PathBuf, logos_rs::personal::Document)>,
     /// The translation imported last, for "Open in a new column".
     last_import: Option<i64>,
+    /// How each translation's verses correspond to the originals', built
+    /// the first time a word of it is studied.
+    verse_maps: HashMap<i64, Rc<VerseMap>>,
+    originals_shape: Option<Rc<Shape>>,
     translations: Vec<Translation>,
     /// The open columns, left to right, as indices into `translations`; never
     /// empty, at most `MAX_COLUMNS`. The first is the primary text: it sets
@@ -147,6 +154,39 @@ impl State {
         l
     }
 
+    fn verse_map(&mut self, tid: i64) -> Rc<VerseMap> {
+        if let Some(m) = self.verse_maps.get(&tid) {
+            return m.clone();
+        }
+        let originals = match &self.originals_shape {
+            Some(s) => s.clone(),
+            None => {
+                let mut lengths = Vec::new();
+                for t in self.translations.iter().filter(|t| t.code == "WLC" || t.code == "SBLGNT") {
+                    lengths.extend(self.bible.verse_lengths(t.id).unwrap_or_default());
+                }
+                let shape = Rc::new(Shape::from_lengths(lengths));
+                self.originals_shape = Some(shape.clone());
+                shape
+            }
+        };
+        let ours = Shape::from_lengths(self.bible.verse_lengths(tid).unwrap_or_default());
+        let map = Rc::new(VerseMap::new(&ours, &originals));
+        self.verse_maps.insert(tid, map.clone());
+        map
+    }
+
+    /// The text of the verses of translation `code` that hold the same
+    /// original verses as `r` of translation `tid`, joined.
+    fn parallel_text(&mut self, tid: i64, r: Ref, code: &str) -> Option<String> {
+        let other = self.translation_by_code(code)?.id;
+        let originals = self.verse_map(tid).originals(r);
+        let verses = self.verse_map(other).verses_for(&originals);
+        let texts: Vec<String> =
+            verses.iter().filter_map(|v| self.bible.verse_text(other, v.0, v.1, v.2).ok().flatten()).collect();
+        (!texts.is_empty()).then(|| texts.join(" "))
+    }
+
     fn translation_by_code(&self, code: &str) -> Option<&Translation> {
         self.translations.iter().find(|t| t.code == code)
     }
@@ -224,8 +264,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         db: db.clone(),
         imports: imports.clone(),
         import_rx: None,
+        relink_rx: None,
         pending_import: None,
         last_import: None,
+        verse_maps: HashMap::new(),
+        originals_shape: None,
         translations,
         columns,
         primary_books,
@@ -311,6 +354,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     refresh_reading(&ui, &state);
 
     import_ui::connect(&ui, &state);
+    import_ui::relink_stale(&state);
 
     // ---- callbacks ----
     // Each callback captures a weak UI handle and a clone of the shared state.
@@ -545,7 +589,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (w, state) = ctx!();
         ui.on_word_clicked(move |col, idx| {
             let ui = w.unwrap();
-            let st = state.borrow();
+            let mut st = state.borrow_mut();
             let Some(trans) = st.column_translation(col).cloned() else { return };
             let Some(word) =
                 st.words.get(col as usize).and_then(|ws| ws.get(idx as usize)).cloned()
@@ -553,63 +597,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return;
             };
 
-            // A modern-language translation (KJV/ULT/LSG…) — as opposed to the
-            // original-language texts (Hebrew/Greek), whose words ARE the original.
-            let is_translation = trans.lang != "hbo" && trans.lang != "grc";
-            let is_ot = word.book < 40;
-            let orig_rtl = is_ot; // Hebrew is RTL, Greek LTR
+            // A translation (KJV, LSG, the Septuagint…) — as opposed to the
+            // originals (Hebrew, Greek), whose words ARE the original. Its
+            // word's link says which original it renders: H, the Hebrew.
+            let is_translation = trans.code != "WLC" && trans.code != "SBLGNT";
+            let hebrew = word.strongs.starts_with('H') || (word.strongs.is_empty() && word.book < 40);
+            let orig_rtl = hebrew;
+            let here = (word.book, word.chapter, word.verse);
 
-            // Reverse lookup: clicking a translation word resolves it to its
-            // original-language word(s) in the same verse.
+            // Reverse lookup: the original word(s) with the same number in
+            // the original verse(s) this one translates — not always the
+            // verse of the same number.
             let mut originals_label = String::new();
             let mut originals: Vec<OriginalWord> = Vec::new();
             let mut parsing = word.parsing.clone();
-            if is_translation && !word.strongs.is_empty() {
-                let orig_code = if is_ot { "WLC" } else { "SBLGNT" };
-                if let Some(ot) = st.translations.iter().find(|t| t.code == orig_code) {
-                    let ws = st
-                        .bible
-                        .words_with_strongs(ot.id, word.book, word.chapter, word.verse, &word.strongs)
-                        .unwrap_or_default();
-                    if parsing.is_empty() && let Some(first) = ws.first() {
-                        parsing = first.parsing.clone();
-                    }
-                    originals = ws
-                        .iter()
-                        .map(|o| OriginalWord {
-                            text: o.text.clone().into(),
-                            parsing: o.parsing.clone().into(),
-                        })
-                        .collect();
-                    originals_label = format!(
-                        "In the {} ({orig_code})",
-                        if is_ot { "Hebrew" } else { "Greek" }
-                    );
+            let orig_code = if hebrew { "WLC" } else { "SBLGNT" };
+            if is_translation
+                && !word.strongs.is_empty()
+                && let Some(ot) = st.translation_by_code(orig_code).map(|t| t.id)
+            {
+                let verses = st.verse_map(trans.id).originals(here);
+                let ws: Vec<Word> = verses
+                    .iter()
+                    .flat_map(|v| st.bible.words_with_strongs(ot, v.0, v.1, v.2, &word.strongs).unwrap_or_default())
+                    .collect();
+                if parsing.is_empty() && let Some(first) = ws.first() {
+                    parsing = first.parsing.clone();
+                }
+                originals = ws
+                    .iter()
+                    .map(|o| OriginalWord { text: o.text.clone().into(), parsing: o.parsing.clone().into() })
+                    .collect();
+                if !originals.is_empty() {
+                    originals_label =
+                        format!("In the {} ({orig_code})", if hebrew { "Hebrew" } else { "Greek" });
                 }
             }
 
-            // Septuagint verse for OT words.
-            let mut lxx = String::new();
-            let mut show_lxx = false;
-            if is_ot
-                && let Some(lt) = st.translations.iter().find(|t| t.code == "LXX")
-                && let Ok(Some(text)) =
-                    st.bible.verse_text(lt.id, word.book, word.chapter, word.verse)
-            {
-                lxx = text;
-                show_lxx = true;
-            }
-
-            // Vulgate (Latin) verse reference — for both OT and NT words.
-            let mut vulgate = String::new();
-            let mut show_vulgate = false;
-            if let Some(vt) = st.translations.iter().find(|t| t.code == "VUL")
-                && let Ok(Some(text)) =
-                    st.bible.verse_text(vt.id, word.book, word.chapter, word.verse)
-            {
-                vulgate = text;
-                show_vulgate = true;
-            }
+            // The Septuagint's and the Vulgate's verses for the same text,
+            // unless that is the text being read.
+            let lxx = (hebrew && trans.code != "LXX").then(|| st.parallel_text(trans.id, here, "LXX")).flatten();
+            let vulgate = (trans.code != "VUL").then(|| st.parallel_text(trans.id, here, "VUL")).flatten();
+            let (show_lxx, show_vulgate) = (lxx.is_some(), vulgate.is_some());
+            let (lxx, vulgate) = (lxx.unwrap_or_default(), vulgate.unwrap_or_default());
 
             ui.set_word(WordInfo {
                 surface: word.text.clone().into(),
@@ -830,12 +860,19 @@ fn refresh_reading(ui: &MainWindow, state: &Rc<RefCell<State>>) {
     // in verse order but a translation may skip a verse, so look it up), or
     // -1 for the top of the chapter.
     let target = st.target_verse.take().map(|v| v as i32);
+    // how each column's verses meet the originals', for the linked rows
+    let maps: Vec<Rc<VerseMap>> = if linked {
+        let ids: Vec<i64> = st.columns.iter().map(|&t| st.translations[t].id).collect();
+        ids.into_iter().map(|id| st.verse_map(id)).collect()
+    } else {
+        Vec::new()
+    };
     let view = |rows: Vec<VerseRow>, col: usize| ColumnView {
         translation: st.columns[col] as i32,
         rows: ModelRc::new(VecModel::from(rows)),
     };
     if linked {
-        let pairs = pair_rows(&columns);
+        let pairs = pair_rows(&columns, &maps, book, chapter);
         ui.set_target_index(row_index(pairs.iter().map(|p| p.verse), target));
         ui.set_pairs(ModelRc::new(VecModel::from(pairs)));
         let views: Vec<ColumnView> = (0..columns.len()).map(|c| view(Vec::new(), c)).collect();
@@ -892,6 +929,7 @@ fn tagged_rows(
         flat.extend(words);
         blocks.push(VerseRow {
             verse: v.verse as i32,
+            label: SharedString::default(),
             text: SharedString::default(),
             words: ModelRc::new(VecModel::from(chips)),
             tagged: true,
@@ -1014,6 +1052,7 @@ fn plain_rows(verses: &[bible::Verse], rtl: bool) -> Vec<VerseRow> {
     verses
         .iter()
         .map(|v| VerseRow {
+            label: SharedString::default(),
             verse: v.verse as i32,
             text: v.text.clone().into(),
             words: ModelRc::new(VecModel::default()),
@@ -1033,24 +1072,98 @@ fn row_index(verses: impl Iterator<Item = i32>, verse: Option<i32>) -> i32 {
 
 /// Align the columns verse by verse for the linked view.
 ///
-/// Matched on verse number rather than position: versification differs between
-/// translations, so one may carry a verse another does not. A missing verse
-/// becomes an empty cell (`VerseRow::default()`, whose verse is 0) and the
-/// rest of the chapter stays aligned.
-fn pair_rows(columns: &[Vec<VerseRow>]) -> Vec<PairRow> {
-    let mut verses: Vec<i32> = columns.iter().flatten().map(|r| r.verse).collect();
-    verses.sort_unstable();
-    verses.dedup();
-    let cell = |rows: &[VerseRow], v: i32| {
-        rows.iter().find(|r| r.verse == v).cloned().unwrap_or_default()
+/// Verses meet through the original verses they hold, not their numbers:
+/// the KJV's Psalm 3:1 holds the Hebrew's title and first verse, which the
+/// Septuagint numbers 1 and 2, so the row puts its 1 and 2 beside the
+/// KJV's 1. Verses of all the columns that share an original verse share a
+/// row; a column with several verses in a row shows them as one, labelled
+/// "1–2".
+/// A column without the verse gets an empty cell (`VerseRow::default()`,
+/// whose verse is 0) and the rest of the chapter stays aligned.
+fn pair_rows(columns: &[Vec<VerseRow>], maps: &[Rc<VerseMap>], book: i64, chapter: i64) -> Vec<PairRow> {
+    // union–find over the original verses, and the verses that have none
+    #[derive(Hash, PartialEq, Eq, Clone, Copy)]
+    enum Key {
+        Original(Ref),
+        Own(usize, i32),
+    }
+    let mut index: HashMap<Key, usize> = HashMap::new();
+    let mut parent: Vec<usize> = Vec::new();
+    let mut sort_key: Vec<Ref> = Vec::new();
+    fn find(parent: &mut [usize], mut x: usize) -> usize {
+        while parent[x] != x {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        x
+    }
+    let mut node = |key: Key, at: Ref, parent: &mut Vec<usize>, sort_key: &mut Vec<Ref>| -> usize {
+        *index.entry(key).or_insert_with(|| {
+            parent.push(parent.len());
+            sort_key.push(at);
+            parent.len() - 1
+        })
     };
-    verses
-        .iter()
-        .map(|&v| {
-            let cells: Vec<VerseRow> = columns.iter().map(|rows| cell(rows, v)).collect();
-            PairRow { verse: v, cells: ModelRc::new(VecModel::from(cells)) }
+    let mut member: Vec<Vec<usize>> = Vec::new(); // per column, per row: its node
+    for (c, rows) in columns.iter().enumerate() {
+        let mut nodes = Vec::new();
+        for row in rows {
+            let here = (book, chapter, row.verse as i64);
+            let originals = maps.get(c).map(|m| m.originals(here)).unwrap_or_default();
+            let first = match originals.first() {
+                Some(o) => node(Key::Original(*o), *o, &mut parent, &mut sort_key),
+                None => node(Key::Own(c, row.verse), here, &mut parent, &mut sort_key),
+            };
+            for o in originals.iter().skip(1) {
+                let other = node(Key::Original(*o), *o, &mut parent, &mut sort_key);
+                let (a, b) = (find(&mut parent, first), find(&mut parent, other));
+                if a != b {
+                    parent[b] = a;
+                    sort_key[a] = sort_key[a].min(sort_key[b]);
+                }
+            }
+            nodes.push(first);
+        }
+        member.push(nodes);
+    }
+    // rows: each group of verses, in the order of the originals
+    let mut groups: HashMap<usize, Vec<Vec<&VerseRow>>> = HashMap::new();
+    for (c, rows) in columns.iter().enumerate() {
+        for (row, &n) in rows.iter().zip(&member[c]) {
+            let root = find(&mut parent, n);
+            groups.entry(root).or_insert_with(|| vec![Vec::new(); columns.len()])[c].push(row);
+        }
+    }
+    let mut ordered: Vec<(Ref, Vec<Vec<&VerseRow>>)> =
+        groups.into_iter().map(|(root, cells)| (sort_key[root], cells)).collect();
+    ordered.sort_by_key(|(k, _)| *k);
+    ordered
+        .into_iter()
+        .map(|(_, cells)| {
+            let cells: Vec<VerseRow> = cells.iter().map(|verses| merge_verses(verses)).collect();
+            PairRow { verse: cells.first().map_or(0, |c| c.verse), cells: ModelRc::new(VecModel::from(cells)) }
         })
         .collect()
+}
+
+/// A column's verses that share a row, as one cell.
+fn merge_verses(verses: &[&VerseRow]) -> VerseRow {
+    match verses {
+        [] => VerseRow::default(),
+        [one] => (*one).clone(),
+        [first, .., last] => {
+            let words: Vec<WordChip> = verses.iter().flat_map(|v| v.words.iter()).collect();
+            let text: Vec<String> = verses.iter().map(|v| v.text.to_string()).filter(|t| !t.is_empty()).collect();
+            VerseRow {
+                verse: first.verse,
+                label: format!("{}–{}", first.verse, last.verse).into(),
+                text: text.join(" ").into(),
+                words: ModelRc::new(VecModel::from(words)),
+                tagged: first.tagged,
+                rtl: first.rtl,
+            }
+        }
+    }
 }
 
 /// Move the current chapter by `delta`, rolling over to adjacent books.

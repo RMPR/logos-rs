@@ -13,6 +13,7 @@ pub mod align;
 pub mod books;
 pub mod docx;
 pub mod epub;
+pub mod greek;
 pub mod pdf;
 pub mod store;
 pub mod text;
@@ -64,6 +65,48 @@ pub fn read(path: &Path, books: &BookMatcher) -> Result<Document, Error> {
         doc.language = guess_language(&doc.verses).to_string();
     }
     Ok(doc)
+}
+
+/// The words of a verse as a reader clicks them: split at spaces, with
+/// punctuation that stands on its own (the French and Latin " : ", an
+/// opening « ) joined to its neighbour by a no-break space, so a colon is
+/// never a word of its own. The aligner and the stored words both count
+/// words this way.
+pub fn words_of(text: &str) -> Vec<String> {
+    word_spans(text).into_iter().map(|(w, _)| w).collect()
+}
+
+/// [`words_of`], with the whitespace-separated tokens each word is made of
+/// (their indices): what carries over a tagging made token by token.
+pub fn word_spans(text: &str) -> Vec<(String, std::ops::Range<usize>)> {
+    let mut words: Vec<(String, std::ops::Range<usize>)> = Vec::new();
+    // leading punctuation, waiting for a word
+    let mut pending: Option<(String, usize)> = None;
+    for (i, token) in text.split_whitespace().enumerate() {
+        if token.chars().any(char::is_alphanumeric) {
+            words.push(match pending.take() {
+                Some((p, start)) => (p + "\u{a0}" + token, start..i + 1),
+                None => (token.to_string(), i..i + 1),
+            });
+        } else if let Some((last, span)) = words.last_mut() {
+            last.push('\u{a0}');
+            last.push_str(token);
+            span.end = i + 1;
+        } else {
+            match &mut pending {
+                Some((p, _)) => {
+                    p.push('\u{a0}');
+                    p.push_str(token);
+                }
+                None => pending = Some((token.to_string(), i)),
+            }
+        }
+    }
+    if let Some((p, start)) = pending {
+        let end = text.split_whitespace().count();
+        words.push((p, start..end));
+    }
+    words
 }
 
 /// A book matcher that knows every book name in the bundled database, in
@@ -157,7 +200,7 @@ pub fn import(
     progress("Reading the Hebrew and Greek…", 0.0);
     let originals = store::originals(&main)?;
     progress("Linking words to the Hebrew and Greek…", 0.05);
-    let alignment = align::align(&doc.verses, &originals, &mut |f| progress("Linking words to the Hebrew and Greek…", 0.05 + 0.85 * f));
+    let alignment = align::align(&doc.verses, &originals, &req.lang, &mut |f| progress("Linking words to the Hebrew and Greek…", 0.05 + 0.85 * f));
 
     // book names in the translation's language, if a bundled text has it
     let mut book_names: HashMap<i64, String> = HashMap::new();
@@ -174,10 +217,28 @@ pub fn import(
     let mut conn = store::open(imports)?;
     let t = store::NewTranslation { code: req.code.trim(), name: req.name.trim(), lang: req.lang.trim(), book_names: &book_names };
     let id = store::save(&mut conn, &t, &doc.verses, &alignment)?;
-    let words = doc.verses.values().map(|v| v.split_whitespace().count()).sum();
+    let words = doc.verses.values().map(|v| words_of(v).len()).sum();
     let linked = alignment.values().flatten().filter(|t| t.is_some()).count();
     progress("Done", 1.0);
     Ok(Report { id, verses: doc.verses.len(), words, linked })
+}
+
+/// Link again, with the current aligner, every imported translation linked
+/// by an older one; returns how many were. Runs at start-up, off the UI.
+pub fn relink_stale(bundled: &Path, imports: &Path) -> Result<usize, Error> {
+    let mut conn = store::open(imports)?;
+    let stale = store::stale(&conn)?;
+    if stale.is_empty() {
+        return Ok(0);
+    }
+    let main = Connection::open_with_flags(bundled, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let originals = store::originals(&main)?;
+    for (id, lang) in &stale {
+        let verses = store::verses(&conn, *id)?;
+        let alignment = align::align(&verses, &originals, lang, &mut |_| {});
+        store::relink(&mut conn, *id, &verses, &alignment)?;
+    }
+    Ok(stale.len())
 }
 
 /// "en-US" → "en"; Norwegian in any of its codes → "nb", the code the
@@ -233,6 +294,16 @@ mod tests {
         assert_eq!(normalize_language("no"), "nb");
         assert_eq!(normalize_language("nb-NO"), "nb");
         assert_eq!(normalize_language("FR"), "fr");
+    }
+
+    #[test]
+    fn punctuation_joins_its_word() {
+        assert_eq!(words_of("super faciem abyssi : et spiritus"), ["super", "faciem", "abyssi\u{a0}:", "et", "spiritus"]);
+        assert_eq!(words_of("« Que la lumière paraisse ! »"), ["«\u{a0}Que", "la", "lumière", "paraisse\u{a0}!\u{a0}»"]);
+        assert_eq!(words_of("…"), ["…"]);
+        let spans: Vec<_> = word_spans("« Oui , dit-il").into_iter().map(|(_, s)| s).collect();
+        assert_eq!(spans, [0..3, 3..4]);
+        assert!(words_of("  ").is_empty());
     }
 
     #[test]

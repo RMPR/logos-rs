@@ -240,6 +240,17 @@ impl Bible {
         rows.collect()
     }
 
+    /// Every verse of a translation with its length in words, for matching
+    /// its numbering to another's (see [`crate::versification`]).
+    pub fn verse_lengths(&self, translation_id: i64) -> rusqlite::Result<Vec<(crate::versification::Ref, usize)>> {
+        let mut stmt = self.conn.prepare("SELECT book, chapter, verse, text FROM verses WHERE translation_id = ?1")?;
+        let rows = stmt.query_map([translation_id], |r| {
+            let text: String = r.get(3)?;
+            Ok(((r.get(0)?, r.get(1)?, r.get(2)?), text.split_whitespace().count()))
+        })?;
+        rows.collect()
+    }
+
     /// The plain text of a single verse (e.g. the parallel Septuagint verse).
     pub fn verse_text(
         &self,

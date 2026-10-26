@@ -10,4 +10,7 @@ Comment:
  unfoldingWord Literal Text (CC BY-SA 4.0), Louis Segond 1910, the Westminster
  Leningrad Codex / OpenScriptures morphhb (CC BY 4.0), SBLGNT / MorphGNT
  (CC BY-SA), the Septuagint and Vulgata Clementina (getbible.net), and the
- OpenScriptures Strong's lexicons. See the project README for details.
+ OpenScriptures Strong's lexicons. Verses are matched across numbering
+ traditions with STEPBible's TVTMS, and Septuagint words named with
+ STEPBible's TBESG lexicon (both CC BY 4.0, Tyndale House Cambridge,
+ www.STEPBible.org). See the project README for details.

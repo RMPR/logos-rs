@@ -95,14 +95,14 @@ struct Source {
     /// Keep only the 66-book Protestant canon (drop deuterocanon / extras).
     canonical_only: bool,
     /// Network-downloadable (getbible). When false, the source must already be
-    /// present locally (e.g. JSON produced from a licensed EPUB by
-    /// tools/epub2json.py); it is skipped if absent and never downloaded.
+    /// present locally; it is skipped if absent and never downloaded.
     downloadable: bool,
 }
 
-/// A Strong's-tagged translation imported by `import_strongs_tagged`: either a
-/// natively tagged edition (KJV) or one carrying a correspondence built by
-/// tools/build_strongs.py.
+/// A translation imported by `import_strongs_tagged` from bolls-style JSON:
+/// the KJV with its own Strong's tagging, or a text whose JSON the former
+/// tools/build_strongs.py made (its tags are dropped: every text is linked
+/// afresh by `link_translations`).
 struct TaggedSource {
     slug: &'static str,
     code: &'static str,
@@ -233,7 +233,7 @@ CREATE VIRTUAL TABLE verses_fts USING fts5(
 );
 "#;
 
-fn data_dir() -> PathBuf {
+pub fn data_dir() -> PathBuf {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("data");
     if manifest.exists() { manifest } else { PathBuf::from("data") }
 }
@@ -383,6 +383,52 @@ fn import_lexicons(
     }
     eprintln!("  lexicon: {} Hebrew + {} Greek entries", doc.descendants().filter(|n| n.has_tag_name("entry")).count(), map.len());
     Ok(greek_map)
+}
+
+/// STEPBible's brief lexicon of extended Strong's numbers for Greek (TBESG,
+/// CC BY 4.0): Abbott-Smith's definitions, and numbers beyond Strong's for
+/// the Septuagint's vocabulary the New Testament does not use. The entries
+/// Strong's already has keep their definitions; the others are added, so a
+/// Septuagint word named by one of them has an entry to show.
+fn import_tbesg(tx: &Transaction, dir: &Path) -> Result<usize, Box<dyn std::error::Error>> {
+    let raw = read_source(&dir.join("lexicon/tbesg.txt"))?;
+    let mut stmt = tx.prepare(
+        "INSERT OR IGNORE INTO lexicon (strongs, lemma, translit, gloss, definition, lang) VALUES (?1,?2,?3,?4,?5,'grc')",
+    )?;
+    let mut added = 0;
+    for line in raw.lines() {
+        let cols: Vec<&str> = line.split('\t').collect();
+        if cols.len() < 8 || !cols[0].starts_with('G') {
+            continue;
+        }
+        let Ok(n) = cols[0][1..].parse::<u32>() else { continue };
+        added += stmt.execute(rusqlite::params![
+            format!("G{n}"),
+            cols[3].trim(),
+            cols[4].trim(),
+            cols[6].trim(),
+            strip_markup(cols[7]),
+        ])?;
+    }
+    Ok(added)
+}
+
+/// TBESG's definitions are marked up for its own viewer: tags, line breaks,
+/// reference links, "__" indents. Plain text here.
+fn strip_markup(html: &str) -> String {
+    let with_breaks = html.replace("<BR />", "\n").replace("<br />", "\n");
+    let mut out = String::with_capacity(with_breaks.len());
+    let mut in_tag = false;
+    for c in with_breaks.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            c if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    let out = out.replace("__", "").replace("&nbsp;", " ").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">");
+    out.lines().map(|l| l.split_whitespace().collect::<Vec<_>>().join(" ")).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n")
 }
 
 fn strongs_num(s: &str) -> u32 {
@@ -707,23 +753,99 @@ struct BollsVerse {
     text: String,
 }
 
+/// A publisher's EPUB of one of the optional texts (licensed, never
+/// committed): its verses; the words are linked afterwards, like every text's.
+fn import_epub(
+    tx: &Transaction,
+    path: &Path,
+    src: &TaggedSource,
+    names: &BookNames,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let books = crate::personal::books::BookMatcher::new([]);
+    let doc = crate::personal::epub::read(path, &books).map_err(|e| e.to_string())?;
+    let tid = insert_translation(tx, src.code, src.name, src.lang, false, true, src.sort)?;
+    let mut stmt =
+        tx.prepare("INSERT INTO verses (translation_id, book, chapter, verse, text) VALUES (?1,?2,?3,?4,?5)")?;
+    let mut max_chapter: HashMap<i64, i64> = HashMap::new();
+    for (&(book, chapter, verse), text) in doc.verses.iter().filter(|((b, _, _), _)| (1..=66).contains(b)) {
+        stmt.execute(rusqlite::params![tid, book, chapter, verse, text])?;
+        let max = max_chapter.entry(book).or_insert(0);
+        *max = (*max).max(chapter);
+    }
+    for (book, chapters) in max_chapter {
+        insert_book(tx, tid, book, &book_name(names, src.lang, book), chapters)?;
+    }
+    Ok(())
+}
+
+/// The former tools/epub2json.py read a merged range "11–12" by its digits, as verse
+/// 1112. Such a number, read after verse 10 of the same chapter, is the
+/// range's first verse, 11 (its second is matched up by versification).
+fn split_joined_range(previous: (i64, i64, i64), (book, chapter, verse): (i64, i64, i64)) -> i64 {
+    let next = previous.2 + 1;
+    if (previous.0, previous.1) == (book, chapter) && verse > next + 8 {
+        let digits = verse.to_string();
+        if let Some(rest) = digits.strip_prefix(&next.to_string())
+            && rest.parse::<i64>().is_ok_and(|end| end > next && end < next + 9)
+        {
+            return next;
+        }
+    }
+    verse
+}
+
+/// Per verse, each word and the Strong's number it carries, if any.
+pub type TaggedText = std::collections::BTreeMap<(i64, i64, i64), Vec<(String, Option<String>)>>;
+
+/// A bolls-style Strong's-tagged text (`data/<slug>.json`): per verse of the
+/// 66 books, each word and the Strong's number it carries (H in the Old
+/// Testament, G in the New). The KJV's is tagging done by people, which the
+/// tests also score the aligner against.
+pub fn read_tagged(dir: &Path, slug: &str) -> Result<TaggedText, Box<dyn std::error::Error>> {
+    let raw = read_source(&dir.join(format!("{slug}.json")))?;
+    let verses: Vec<BollsVerse> = serde_json::from_str(&raw)?;
+    // <sup>…</sup> are translator footnotes (stripped); <S>n</S> are Strong's.
+    let re_sup = regex::Regex::new(r"(?s)<sup>.*?</sup>")?;
+    let re_strong = regex::Regex::new(r"<S>(\d+)</S>")?;
+    let re_strong_full = regex::Regex::new(r"<S>\d+</S>")?;
+    let mut out = std::collections::BTreeMap::new();
+    let mut previous = (0, 0, 0);
+    for v in &verses {
+        if !(1..=66).contains(&v.book) {
+            continue; // drop Apocrypha (bolls numbers them 67+)
+        }
+        let verse = split_joined_range(previous, (v.book, v.chapter, v.verse));
+        previous = (v.book, v.chapter, verse);
+        let cleaned = re_sup.replace_all(&v.text, "");
+        let mut words = Vec::new();
+        for token in cleaned.split_whitespace() {
+            // first Strong's on the token → H#### (OT) / G#### (NT)
+            let strongs = re_strong
+                .captures(token)
+                .map(|c| if v.book < 40 { format!("H{}", &c[1]) } else { format!("G{}", &c[1]) });
+            let display = re_strong_full.replace_all(token, "");
+            let display = display.trim();
+            if display.is_empty() {
+                continue; // e.g. the untranslated <S>853</S> object marker
+            }
+            words.push((display.to_string(), strongs));
+        }
+        out.insert((v.book, v.chapter, verse), words);
+    }
+    Ok(out)
+}
+
 /// Import a bolls-style Strong's-tagged translation (`<S>n</S>` after words):
-/// the public-domain KJV, and the Louis Segond correspondence built by
-/// tools/build_lsg_strongs.py. Each becomes a clickable reverse interlinear.
+/// the public-domain KJV and the texts kept in that form (Louis Segond, and
+/// the optional ones when no EPUB of theirs is in data/).
 fn import_strongs_tagged(
     tx: &Transaction,
     dir: &Path,
     src: &TaggedSource,
     names: &BookNames,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let raw = read_source(&dir.join(format!("{}.json", src.slug)))?;
-    let verses: Vec<BollsVerse> = serde_json::from_str(&raw)?;
+    let verses = read_tagged(dir, src.slug)?;
     let tid = insert_translation(tx, src.code, src.name, src.lang, false, true, src.sort)?;
-
-    // <sup>…</sup> are translator footnotes (stripped); <S>n</S> are Strong's.
-    let re_sup = regex::Regex::new(r"(?s)<sup>.*?</sup>")?;
-    let re_strong = regex::Regex::new(r"<S>(\d+)</S>")?;
-    let re_strong_full = regex::Regex::new(r"<S>\d+</S>")?;
 
     let mut vstmt = tx.prepare(
         "INSERT INTO verses (translation_id, book, chapter, verse, text) VALUES (?1,?2,?3,?4,?5)",
@@ -734,42 +856,111 @@ fn import_strongs_tagged(
     )?;
 
     let mut max_chapter: HashMap<i64, i64> = HashMap::new();
-    for v in &verses {
-        if !(1..=66).contains(&v.book) {
-            continue; // drop Apocrypha (bolls numbers them 67+)
-        }
-        max_chapter
-            .entry(v.book)
-            .and_modify(|m| *m = (*m).max(v.chapter))
-            .or_insert(v.chapter);
-
-        let cleaned = re_sup.replace_all(&v.text, "");
-        let mut position = 0i64;
-        let mut surfaces: Vec<String> = Vec::new();
-        for token in cleaned.split_whitespace() {
-            // first Strong's on the token → H#### (OT) / G#### (NT)
-            let strongs = re_strong.captures(token).map(|c| {
-                if v.book < 40 { format!("H{}", &c[1]) } else { format!("G{}", &c[1]) }
-            });
-            let display = re_strong_full.replace_all(token, "");
-            let display = display.trim();
-            if display.is_empty() {
-                continue; // e.g. the untranslated <S>853</S> object marker
-            }
+    for ((book, chapter, verse), words) in &verses {
+        max_chapter.entry(*book).and_modify(|m| *m = (*m).max(*chapter)).or_insert(*chapter);
+        for (position, (display, strongs)) in words.iter().enumerate() {
             wstmt.execute(rusqlite::params![
-                tid, v.book, v.chapter, v.verse, position,
-                display, "", strongs, "", ""
+                tid, book, chapter, verse, position as i64, display, "", strongs, "", ""
             ])?;
-            surfaces.push(display.to_string());
-            position += 1;
         }
-        vstmt.execute(rusqlite::params![tid, v.book, v.chapter, v.verse, surfaces.join(" ")])?;
+        let text: Vec<&str> = words.iter().map(|(d, _)| d.as_str()).collect();
+        vstmt.execute(rusqlite::params![tid, book, chapter, verse, text.join(" ")])?;
     }
 
     for book in 1..=66 {
         if let Some(&mc) = max_chapter.get(&book) {
             insert_book(tx, tid, book, &book_name(names, src.lang, book), mc)?;
         }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Linking every translation's words to the originals
+// ---------------------------------------------------------------------------
+
+/// The translations linked word by word to the Hebrew and Greek, with their
+/// language (for stemming), and whether their own Strong's tagging — made by
+/// people — is kept, the aligner only filling the words it leaves untagged.
+const LINKED: &[(&str, &str, bool)] = &[
+    ("KJV", "en", true),
+    ("ULT", "en", true),
+    ("LSG", "fr", false),
+    ("ESV", "en", false),
+    ("BFC", "fr", false),
+    ("NB", "nb", false),
+    ("LXX", "grc", false),
+    ("VUL", "la", false),
+];
+
+/// Link every word of every translation to the Hebrew or Greek word it
+/// renders (see [`crate::personal::align`]), so each is a clickable reverse
+/// interlinear. Replaces the correspondences the former
+/// tools/build_strongs.py built.
+fn link_translations(tx: &Transaction) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::personal::{align, store, word_spans};
+    let originals = store::originals(tx).map_err(|e| e.to_string())?;
+    for &(code, lang, keep_human) in LINKED {
+        let Some(tid) = tx
+            .query_row("SELECT id FROM translations WHERE code = ?1", [code], |r| r.get::<_, i64>(0))
+            .ok()
+        else {
+            continue;
+        };
+        let started = std::time::Instant::now();
+        let mut verses = crate::personal::text::Verses::new();
+        {
+            let mut stmt = tx.prepare("SELECT book, chapter, verse, text FROM verses WHERE translation_id = ?1")?;
+            let mut rows = stmt.query([tid])?;
+            while let Some(r) = rows.next()? {
+                verses.insert((r.get(0)?, r.get(1)?, r.get(2)?), r.get(3)?);
+            }
+        }
+        // the tagging already there, token by token: (strongs, lemma, morph, parsing)
+        type Tag = (Option<String>, String, String, String);
+        let mut human: HashMap<(i64, i64, i64), Vec<Tag>> = HashMap::new();
+        if keep_human {
+            let mut stmt = tx.prepare(
+                "SELECT book, chapter, verse, NULLIF(strongs, ''), COALESCE(lemma,''), COALESCE(morph,''), COALESCE(parsing,'')
+                 FROM words WHERE translation_id = ?1 ORDER BY book, chapter, verse, position",
+            )?;
+            let mut rows = stmt.query([tid])?;
+            while let Some(r) = rows.next()? {
+                human.entry((r.get(0)?, r.get(1)?, r.get(2)?)).or_default().push((r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?));
+            }
+        }
+        let alignment = align::align(&verses, &originals, lang, &mut |_| {});
+
+        tx.execute("DELETE FROM words WHERE translation_id = ?1", [tid])?;
+        let mut insert = tx.prepare(
+            "INSERT INTO words (translation_id, book, chapter, verse, position, text, lemma, strongs, morph, parsing)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+        )?;
+        let (mut words, mut linked, mut kept) = (0usize, 0usize, 0usize);
+        for (key, text) in &verses {
+            let tags = alignment.get(key);
+            let theirs = human.get(key);
+            for (position, (word, span)) in word_spans(text).into_iter().enumerate() {
+                // a tag made by people wins; the first in a merged word
+                let mine = theirs.and_then(|t| span.clone().filter_map(|i| t.get(i)).find(|t| t.0.is_some()));
+                let aligned = tags.and_then(|t| t.get(position).copied().flatten()).map(|s| s.to_string());
+                let strongs = mine.and_then(|t| t.0.clone()).or(aligned);
+                let empty = (None, String::new(), String::new(), String::new());
+                let (_, lemma, morph, parsing) = mine.unwrap_or(&empty);
+                words += 1;
+                linked += strongs.is_some() as usize;
+                kept += mine.is_some() as usize;
+                insert.execute(rusqlite::params![
+                    tid, key.0, key.1, key.2, position as i64, word, lemma, strongs, morph, parsing
+                ])?;
+            }
+        }
+        tx.execute("UPDATE translations SET tagged = 1 WHERE id = ?1", [tid])?;
+        eprintln!(
+            "  {code}: {linked} of {words} words linked ({:.1}%, {kept} by hand) in {:.0?}",
+            100.0 * linked as f64 / words.max(1) as f64,
+            started.elapsed()
+        );
     }
     Ok(())
 }
@@ -791,6 +982,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     eprintln!("importing lexicons");
     let greek_map = import_lexicons(&tx, &dir)?;
+    let extended = import_tbesg(&tx, &dir)?;
+    eprintln!("  lexicon: {extended} extended Greek entries (STEPBible TBESG)");
 
     eprintln!("importing KJV (bolls.life, with Strong's numbers)");
     let kjv = TaggedSource {
@@ -806,19 +999,32 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // EPUB-derived texts, tagged with a built Strong's correspondence. Their
     // text is copyrighted → the *_strongs.json are local-only, skipped if absent.
-    for src in [
-        TaggedSource {
-            slug: "esv_strongs", code: "ESV", name: "English Standard Version", lang: "en", sort: 7,
-        },
-        TaggedSource {
-            slug: "fc_strongs", code: "BFC", name: "Bible en français courant", lang: "fr", sort: 8,
-        },
-        TaggedSource {
-            slug: "nb_strongs", code: "NB", name: "Bibelen 2011 (Bokmål)", lang: "nb", sort: 9,
-        },
+    // Read from the publishers' EPUBs placed in data/, or from the JSON once
+    // made from them by the former tools/epub2json.py.
+    let epubs: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .map(|d| d.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "epub")).collect())
+        .unwrap_or_default();
+    for (src, publisher) in [
+        (
+            TaggedSource { slug: "esv_strongs", code: "ESV", name: "English Standard Version", lang: "en", sort: 7 },
+            "Crossway",
+        ),
+        (
+            TaggedSource { slug: "fc_strongs", code: "BFC", name: "Bible en français courant", lang: "fr", sort: 8 },
+            "Société biblique française",
+        ),
+        (
+            TaggedSource { slug: "nb_strongs", code: "NB", name: "Bibelen 2011 (Bokmål)", lang: "nb", sort: 9 },
+            "Bibelselskapet",
+        ),
     ] {
-        match import_strongs_tagged(&tx, &dir, &src, &names) {
-            Ok(()) => eprintln!("importing {} (built Strong's correspondence)", src.code),
+        let epub = epubs.iter().find(|p| crate::personal::epub::publisher(p) == Some(publisher));
+        let imported = match epub {
+            Some(path) => import_epub(&tx, path, &src, &names).map(|()| format!("from {}", path.display())),
+            None => import_strongs_tagged(&tx, &dir, &src, &names).map(|()| format!("from {}.json", src.slug)),
+        };
+        match imported {
+            Ok(from) => eprintln!("importing {} {from}", src.code),
             Err(_) => eprintln!("skipping {} — optional source not present", src.code),
         }
     }
@@ -843,6 +1049,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("importing ULT (unfoldingWord, word-aligned English)");
     import_ult(&tx, &dir, &names)?;
 
+    eprintln!("linking every translation's words to the Hebrew and Greek");
+    link_translations(&tx)?;
+
     tx.commit()?;
 
     eprintln!("building full-text index…");
@@ -856,4 +1065,28 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let tagged: i64 = conn.query_row("SELECT count(*) FROM words WHERE strongs IS NOT NULL", [], |r| r.get(0))?;
     eprintln!("done → {} ({verses} verses, {words} words, {tagged} with Strong's)", db_path.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn joined_ranges_split() {
+        assert_eq!(split_joined_range((45, 9, 10), (45, 9, 1112)), 11);
+        assert_eq!(split_joined_range((49, 1, 14), (49, 1, 1516)), 15);
+        // real verses are left alone
+        assert_eq!(split_joined_range((19, 119, 99), (19, 119, 100)), 100);
+        assert_eq!(split_joined_range((27, 3, 99), (27, 3, 100)), 100);
+        assert_eq!(split_joined_range((1, 1, 31), (1, 2, 1)), 1);
+    }
+
+    #[test]
+    fn markup_is_stripped() {
+        let html = " <b>ἀγγέλλω</b> (ἄγγελος), <BR /> [in LXX for נגד hi. ;] <BR /><b>to announce, report</b>: <ref='Jhn.4.51'>Jhn.4:51</ref> (WHR omit).†<BR /> __I. Of";
+        assert_eq!(
+            strip_markup(html),
+            "ἀγγέλλω (ἄγγελος),\n[in LXX for נגד hi. ;]\nto announce, report: Jhn.4:51 (WHR omit).†\nI. Of"
+        );
+    }
 }

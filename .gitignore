@@ -13,3 +13,7 @@
 /data/ult/*.usfm
 /data/lexicon/*.xml
 /data/lexicon/*.js
+
+# Publishers' EPUBs of the optional texts: licensed, never committed
+/data/*.epub
+/data/*.pdf

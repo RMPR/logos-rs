@@ -47,6 +47,19 @@ fn import_read_back_and_remove() {
     // a code can only be used once
     assert!(personal::import(&bundled, &imports, &req, &doc, &mut |_, _| {}).is_err());
 
+    // linked by an older aligner: linked again, once
+    {
+        let conn = store::open(&imports).unwrap();
+        assert!(store::stale(&conn).unwrap().is_empty());
+        conn.execute("UPDATE meta SET value = '1' WHERE key = ?1", [format!("linked:{}", tst.id)]).unwrap();
+        assert_eq!(store::stale(&conn).unwrap(), vec![(tst.id, "en".to_string())]);
+    }
+    assert_eq!(personal::relink_stale(&bundled, &imports).unwrap(), 1);
+    assert_eq!(personal::relink_stale(&bundled, &imports).unwrap(), 0);
+    let words = bible.words(tst.id, 43, 1, 1).unwrap();
+    assert_eq!(words.len(), 17);
+    assert!(words.iter().all(|w| !w.strongs.is_empty()), "every word linked");
+
     let mut conn = store::open(&imports).unwrap();
     store::delete(&mut conn, tst.id).unwrap();
     assert!(bible.translations().unwrap().iter().all(|t| t.code != "TST"));

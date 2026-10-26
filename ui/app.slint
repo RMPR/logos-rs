@@ -213,6 +213,9 @@ export struct WordChip { idx: int, text: string, tagged: bool, rare: bool }
 // what lets the two columns lock their scroll positions to each other.
 export struct VerseRow {
     verse: int,
+    /// Shown instead of the number when the row holds a run of verses, as
+    /// in the linked view against a Bible numbering them as one ("1–2").
+    label: string,
     text: string,
     words: [WordChip],
     tagged: bool,
@@ -286,6 +289,7 @@ component Pill inherits Rectangle {
 // ---------------------------------------------------------------------------
 component VerseNumber inherits Rectangle {
     in property <int> verse;
+    in property <string> label;
     in property <int> column;
     in property <bool> tagged;
     /// Leading numbers sit flush against the text; a trailing one (after
@@ -299,7 +303,7 @@ component VerseNumber inherits Rectangle {
     Text {
         width: 100%;
         height: 100%;
-        text: root.verse;
+        text: root.label != "" ? root.label : root.verse;
         color: ntouch.has-hover ? Theme.accent : Theme.verse-num;
         font-size: Theme.verse-number-size;
         font-weight: Passage.is-marked(root.column, root.verse) ? 700 : 400;
@@ -400,6 +404,7 @@ component VerseCell inherits Rectangle {
             width: root.number-width;
             height: root.body-height;
             verse: root.verse-row.verse;
+            label: root.verse-row.label;
             column: root.column;
             tagged: root.verse-row.tagged;
             alignment: root.trailing-number ? left : right;
@@ -947,6 +952,7 @@ component ParallelColumns inherits Rectangle {
 // ---------------------------------------------------------------------------
 export component MainWindow inherits Window {
     title: "LeVerbe";
+    icon: @image-url("icon.png");
     preferred-width: 1200px;
     preferred-height: 820px;
     min-width: 720px;
@@ -1134,13 +1140,24 @@ export component MainWindow inherits Window {
                     spacing: 12px;
                     // Each item is vertically centered so the logo, search box and
                     // buttons share one baseline across the 52px bar.
-                    VerticalLayout {
-                        alignment: center;
-                        Text {
-                            text: "✝ LeVerbe";
-                            color: Theme.accent;
-                            font-size: 18px;
-                            font-weight: 700;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        VerticalLayout {
+                            alignment: center;
+                            Image {
+                                source: @image-url("logo.svg");
+                                width: 28px;
+                                height: 28px;
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            Text {
+                                text: "LeVerbe";
+                                color: Theme.accent;
+                                font-size: 18px;
+                                font-weight: 700;
+                            }
                         }
                     }
                     // command / search box

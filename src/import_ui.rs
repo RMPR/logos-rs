@@ -21,6 +21,8 @@ pub enum Msg {
     Progress(String, f32),
     Imported(Result<Report, String>),
     Removed(Result<(), String>),
+    /// Imports linked again by a newer aligner, at start-up.
+    Relinked(Result<usize, String>),
 }
 
 /// Stages of the card, as `import-stage` has them.
@@ -164,6 +166,18 @@ pub fn connect(ui: &MainWindow, state: &Rc<RefCell<State>>) {
     }
 }
 
+/// Link again, on a worker, the imports an older aligner linked.
+pub fn relink_stale(state: &Rc<RefCell<State>>) {
+    let mut st = state.borrow_mut();
+    let Some(imports) = st.imports.clone() else { return };
+    let db = st.db.clone();
+    let (tx, rx) = mpsc::channel();
+    st.relink_rx = Some(rx);
+    std::thread::spawn(move || {
+        let _ = tx.send(Msg::Relinked(personal::relink_stale(&db, &imports).map_err(|e| e.to_string())));
+    });
+}
+
 /// Read `path` on a worker; the card shows what was found when it is done.
 pub fn start_read(ui: &MainWindow, state: &Rc<RefCell<State>>, path: PathBuf) {
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -187,8 +201,9 @@ pub fn start_read(ui: &MainWindow, state: &Rc<RefCell<State>>, path: PathBuf) {
 pub fn poll(ui: &MainWindow, state: &Rc<RefCell<State>>) {
     let messages: Vec<Msg> = {
         let st = state.borrow();
-        let Some(rx) = &st.import_rx else { return };
-        rx.try_iter().collect()
+        let card = st.import_rx.iter().flat_map(|rx| rx.try_iter());
+        let relinking = st.relink_rx.iter().flat_map(|rx| rx.try_iter());
+        card.chain(relinking).collect()
     };
     for msg in messages {
         match msg {
@@ -244,6 +259,9 @@ pub fn poll(ui: &MainWindow, state: &Rc<RefCell<State>>) {
                 reload_translations(ui, state);
                 ui.set_import_stage(CHOOSE);
             }
+            // the open chapter shows the new links
+            Msg::Relinked(Ok(n)) if n > 0 => refresh_reading(ui, state),
+            Msg::Relinked(_) => {}
         }
     }
 }
