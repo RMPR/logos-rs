@@ -22,6 +22,7 @@ DefaultDirName={autopf}\LeVerbe
 DefaultGroupName=LeVerbe
 DisableProgramGroupPage=yes
 UninstallDisplayIcon={app}\LeVerbe.exe
+SetupIconFile=leverbe.ico
 OutputDir={#OutputDir}
 OutputBaseFilename=LeVerbe-{#AppVersion}-windows-x64-setup
 Compression=lzma2/max
