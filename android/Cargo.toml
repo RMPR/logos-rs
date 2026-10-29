@@ -5,7 +5,7 @@
 #   tools/android-db.sh && cargo apk build -p leverbe-android --release
 [package]
 name = "leverbe-android"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 publish = false
 
