@@ -138,6 +138,11 @@ jobs:
         with:
           targets: aarch64-linux-android
       - uses: Swatinem/rust-cache@v2
+      # the importer is built for this machine, desktop UI and all
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libfontconfig-dev libfreetype-dev libxkbcommon-dev
       - name: Install cargo-apk
         run: cargo install cargo-apk --locked
       - name: Build the Bible database
