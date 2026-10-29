@@ -8,7 +8,7 @@
 //! dropped and the default takes over — a stale session file must never stop
 //! the app from starting.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -35,6 +35,10 @@ pub struct Session {
     /// corpus on its own conventional default.
     pub threshold: Option<i64>,
     pub dark: bool,
+    /// The high-contrast theme for e-ink screens, which overrides `dark`.
+    /// `None` until the reader picks a theme: each platform then starts on
+    /// its own default (e-ink on a tablet).
+    pub eink: Option<bool>,
     /// Scale of the Bible text (1.0 is the normal size).
     pub zoom: f32,
     /// Window size in *logical* pixels — physical ones would be re-scaled by
@@ -57,6 +61,7 @@ impl Default for Session {
             reader: false,
             threshold: None,
             dark: true,
+            eink: None,
             zoom: 1.0,
             width: None,
             height: None,
@@ -88,24 +93,25 @@ pub fn path() -> Option<PathBuf> {
         .map(|d| d.config_dir().join("session.json"))
 }
 
-/// Load the last session, or the defaults if there is nothing readable. A
-/// corrupt file is treated as absent rather than reported: the reader cannot
-/// act on the error, and losing the last passage is not worth a failed start.
-pub fn load() -> Session {
-    let Some(path) = path() else { return Session::default() };
-    let Ok(raw) = std::fs::read_to_string(&path) else { return Session::default() };
+/// Load the last session from `path`, or the defaults if there is nothing
+/// readable. A corrupt file is treated as absent rather than reported: the
+/// reader cannot act on the error, and losing the last passage is not worth a
+/// failed start.
+pub fn load(path: Option<&Path>) -> Session {
+    let Some(path) = path else { return Session::default() };
+    let Ok(raw) = std::fs::read_to_string(path) else { return Session::default() };
     serde_json::from_str(&raw).unwrap_or_default()
 }
 
-/// Write the session, creating the config directory if needed. Failures are
-/// silent for the same reason.
-pub fn save(session: &Session) {
-    let Some(path) = path() else { return };
+/// Write the session to `path`, creating its directory if needed. Failures
+/// are silent for the same reason.
+pub fn save(path: Option<&Path>, session: &Session) {
+    let Some(path) = path else { return };
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
     if let Ok(raw) = serde_json::to_string_pretty(session) {
-        let _ = std::fs::write(&path, raw);
+        let _ = std::fs::write(path, raw);
     }
 }
 

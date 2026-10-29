@@ -76,6 +76,15 @@ study experience that runs natively on Linux with a cleaner, faster UX.
 - **Full-text search** (SQLite FTS5), ranked, with match highlighting. Greek search
   is accent-insensitive.
 - **Dark / light** themes.
+- **Android, for e-ink tablets** (Boox and the like) — the same app with a
+  touch layout: tap a word to study it, *hold* a word and drag to select,
+  tap verse numbers to mark a run, and copy from the bar that appears. Pages
+  turn a screenful at a time (▲/▼, or the reader's page keys) rather than
+  scrolling, which ghosts on e-ink; a pinch or **A−/A+** sizes the text. A
+  high-contrast **E-ink** theme is the default, and the panes appear without
+  animation. Held upright, the book list and the word study open over the
+  text instead of beside it. Hebrew and Greek are set in bundled fonts (Ezra
+  SIL, Gentium Book Plus). Importing translations is desktop-only for now.
 
 ## Importing a translation
 
@@ -185,6 +194,10 @@ complete Bible database, so the app works offline from the first launch.
 - **Windows (x64)**: run `LeVerbe-<version>-windows-x64-setup.exe` (installs per
   user, no admin rights needed), or unzip the portable
   `LeVerbe-<version>-windows-x64.zip` and run `LeVerbe.exe`.
+- **Android (64-bit ARM, Android 8+)**: sideload `LeVerbe-<version>-android-arm64.apk`
+  (on a Boox: copy it over and open it, allowing installs from unknown
+  sources). The first launch unpacks the Bible into the app's storage, which
+  takes a minute at most.
 
 Releases are built by `.github/workflows/release.yml`: push a tag `vX.Y.Z`, or
 run the workflow by hand from the Actions tab with a version (it then creates
@@ -210,6 +223,9 @@ generated, not committed.
 - The importer reads each source from its committed `.gz`; if a raw (un-gzipped)
   copy is present it uses that, and only downloads from the network if a source
   is missing entirely.
+- Try the tablet layout on a desktop: `LEVERBE_TOUCH=1 cargo run --bin logos-rs`.
+
+The Android app is built with `cargo-apk`; see [`android/README.md`](android/README.md).
 
 ## Architecture
 
@@ -220,9 +236,12 @@ src/
   morph.rs      Morphology decoders: OSHM (Hebrew) + MorphGNT (Greek) → prose
   bible.rs      Read-only data model over SQLite (verses, words, lexicon, FTS)
   importer.rs   Builds bible.db from getbible/morphhb/MorphGNT/ULT + Strong's lexicons
-  main.rs       Slint UI wiring (state, callbacks, word wrapping)
+  app/          Slint UI wiring (state, callbacks, models), desktop and Android alike
+  main.rs       The desktop executable: finds or builds the database, runs `app`
 ui/
   app.slint     UI: theme, nav, reading columns, search, parallel, word study
+  fonts/        Hebrew and Greek typefaces for the tablet build (SIL OFL)
+android/        The Android app: runs `app`, ships the database in the APK
 ```
 
 Database tables: `translations`, `books`, `verses` (+ `verses_fts`),

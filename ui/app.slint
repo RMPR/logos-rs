@@ -1,29 +1,74 @@
 import { ComboBox, LineEdit, ScrollView, ListView, Palette, ProgressIndicator } from "std-widgets.slint";
 
+// Typefaces for the tablet, which cannot count on the system having any that
+// set pointed, cantillated Hebrew or polytonic Greek well: Gentium Book Plus
+// (Latin and Greek, a weight that holds up on e-ink) and Ezra SIL (Hebrew,
+// modelled on the BHS). Both SIL Open Font License; see fonts/.
+import "fonts/GentiumBookPlus-Regular.ttf";
+import "fonts/GentiumBookPlus-Bold.ttf";
+import "fonts/EzraSIL-Regular.ttf";
+
 // ---------------------------------------------------------------------------
-// Theme — all colours derive from a single `dark` switch.
+// Theme — all colours derive from the `dark` and `eink` switches.
 // ---------------------------------------------------------------------------
 export global Theme {
     in-out property <bool> dark: true;
+    /// High contrast for e-ink screens: black on white, and none of the soft
+    /// tints, which an e-ink panel turns into muddy grey. Overrides `dark`.
+    in-out property <bool> eink: false;
+    /// A touch screen (the tablet build): larger targets, buttons for what the
+    /// keyboard does, long-press to select, panes that fold away.
+    in-out property <bool> touch: false;
 
-    out property <color> bg:        dark ? #1b1c1f : #fcfbf8;
-    out property <color> panel:     dark ? #232428 : #f2f0ea;
-    out property <color> panel-alt: dark ? #2b2d32 : #e9e6dd;
-    out property <color> border:    dark ? #36383e : #ddd8cc;
-    out property <color> text:      dark ? #e8e8ea : #1f2329;
-    out property <color> muted:     dark ? #9499a1 : #6c7177;
-    out property <color> accent:    dark ? #6ea8fe : #2563eb;
-    out property <color> accent-bg: dark ? #2a3550 : #e2ecff;
-    out property <color> verse-num: dark ? #7d838d : #9aa0a6;
+    out property <color> bg:        eink ? #ffffff : dark ? #1b1c1f : #fcfbf8;
+    out property <color> panel:     eink ? #ffffff : dark ? #232428 : #f2f0ea;
+    out property <color> panel-alt: eink ? #e6e6e6 : dark ? #2b2d32 : #e9e6dd;
+    out property <color> border:    eink ? #444444 : dark ? #36383e : #ddd8cc;
+    out property <color> text:      eink ? #000000 : dark ? #e8e8ea : #1f2329;
+    out property <color> muted:     eink ? #333333 : dark ? #9499a1 : #6c7177;
+    out property <color> accent:    eink ? #000000 : dark ? #6ea8fe : #2563eb;
+    out property <color> accent-bg: eink ? #d4d4d4 : dark ? #2a3550 : #e2ecff;
+    out property <color> verse-num: eink ? #444444 : dark ? #7d838d : #9aa0a6;
 
-    out property <color> selection: dark ? #6ea8fe66 : #2563eb40;
-    out property <color> danger:    dark ? #f28b82 : #c5221f;
+    out property <color> selection: eink ? #00000038 : dark ? #6ea8fe66 : #2563eb40;
+    out property <color> danger:    eink ? #000000 : dark ? #f28b82 : #c5221f;
+    out property <bool> dark-widgets: dark && !eink;
 
-    /// Scale of the Bible text, set with Ctrl+plus / Ctrl+minus. The rest of
-    /// the interface keeps its size.
+    /// Scale of the Bible text, set with Ctrl+plus / Ctrl+minus, the A−/A+
+    /// buttons or a pinch. The rest of the interface keeps its size.
     in-out property <float> zoom: 1.0;
+    out property <float> min-zoom: 0.6;
+    out property <float> max-zoom: 2.5;
     out property <length> reading-size: 17px * root.zoom;
     out property <length> verse-number-size: 12px * root.zoom;
+
+    /// Families for Bible text: the bundled ones on a tablet, the system's
+    /// (an empty family) on a desktop.
+    out property <string> reading-font: touch ? "Gentium Book Plus" : "";
+    out property <string> hebrew-font: touch ? "Ezra SIL" : "";
+    /// Height of buttons and list rows: a fingertip needs more than a pointer.
+    out property <length> target: touch ? 40px : 28px;
+
+    public function zoom-by(steps: int) {
+        root.zoom = max(root.min-zoom, min(root.max-zoom, round(root.zoom * 10 + steps) / 10));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Paging through a chapter a screenful at a time — the way to read on with an
+// e-ink screen, which ghosts through a smooth scroll. Every reading column
+// moves when `epoch` is bumped; the leading one calls `past` when there is no
+// page left that way, to turn the chapter.
+// ---------------------------------------------------------------------------
+export global Paging {
+    out property <int> epoch;
+    out property <int> direction;
+    callback past(int);
+
+    public function turn(direction: int) {
+        root.direction = direction;
+        root.epoch += 1;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -36,6 +81,11 @@ export global Theme {
 //    run between them. Copied verses are headed by their reference.
 // Ctrl+C or a verse's context menu copies whichever there is. Prose verses
 // (untagged translations) are ordinary selectable text besides.
+//
+// On a touch screen a drag scrolls, so selecting words starts with a long
+// press instead: hold a word, then drag. A tap is still a click on the word.
+// Tapping a second verse number extends the mark (there is no shift key), and
+// the selection bar along the bottom copies, in place of Ctrl+C and the menus.
 //
 // Rust formats the text, since it alone holds the words, book names and
 // translation codes; the result reaches the clipboard through `clip`, which
@@ -61,6 +111,14 @@ export global Passage {
     out property <length> pointer-y;
     property <bool> moved;
 
+    /// Touch: a word is held, not yet long enough to start a selection. The
+    /// window's timer calls `hold` if it is still held when it fires.
+    out property <bool> armed;
+    property <int> armed-column;
+    property <int> armed-word;
+    property <length> press-x;
+    property <length> press-y;
+
     /// Bumped whenever a selection starts, so the window can take the keys
     /// back from a focused text and Ctrl+C reaches the selection.
     out property <int> focus-epoch;
@@ -79,7 +137,9 @@ export global Passage {
 
     public function mark(column: int, verse: int, extend: bool) {
         root.word-column = -1;
-        if (extend && column == root.column) {
+        // touch: a second number extends the mark from the first
+        let extending = extend || (Theme.touch && column == root.column && verse != root.anchor);
+        if (extending && column == root.column) {
             root.from = min(root.anchor, verse);
             root.to = max(root.anchor, verse);
         } else if (column == root.column && verse == root.from && verse == root.to) {
@@ -113,6 +173,37 @@ export global Passage {
     public function drag(x: length, y: length) {
         root.pointer-x = x;
         root.pointer-y = y;
+        // a finger that wanders before the hold is up is not holding
+        if (root.armed && (abs(x - root.press-x) > 10px || abs(y - root.press-y) > 10px)) {
+            root.armed = false;
+        }
+    }
+
+    /// Touch: a word is pressed; it becomes a selection if held.
+    public function arm(column: int, word: int, x: length, y: length) {
+        root.armed = true;
+        root.armed-column = column;
+        root.armed-word = word;
+        root.press-x = x;
+        root.press-y = y;
+        root.pointer-x = x;
+        root.pointer-y = y;
+    }
+
+    /// Touch: the held word starts a selection, which dragging extends.
+    public function hold() {
+        if (!root.armed) {
+            return;
+        }
+        root.armed = false;
+        root.column = -1;
+        root.word-column = root.armed-column;
+        root.word-anchor = root.armed-word;
+        root.word-end = root.armed-word;
+        root.dragging = true;
+        // a held word is a selection, never a click on release
+        root.moved = true;
+        root.focus-epoch += 1;
     }
 
     /// A word reports that the dragging pointer is over it.
@@ -125,6 +216,15 @@ export global Passage {
 
     /// Ends a press; true when it never left its word, i.e. was a click.
     public function release() -> bool {
+        // touch: let go before the hold was up — a tap
+        if (root.armed) {
+            root.armed = false;
+            return true;
+        }
+        // touch: a press given up to a scroll, or one that wandered off
+        if (!root.dragging) {
+            return false;
+        }
         root.dragging = false;
         if (!root.moved) {
             root.word-column = -1;
@@ -143,7 +243,16 @@ export global Passage {
         root.column = -1;
         root.word-column = -1;
         root.dragging = false;
+        root.armed = false;
     }
+
+    /// What is selected, for the touch selection bar.
+    out property <string> summary:
+        root.word-column >= 0
+            ? (root.word-end == root.word-anchor ? "1 word selected" : (abs(root.word-end - root.word-anchor) + 1) + " words selected")
+        : root.column < 0 ? ""
+        : root.from == root.to ? "Verse " + root.from + " marked"
+        : "Verses " + root.from + "–" + root.to + " marked";
 
     public function put(text: string) {
         root.clip = text;
@@ -178,6 +287,10 @@ export global Passage {
 component SelectableText inherits TextInput {
     read-only: true;
     single-line: false;
+    // On a touch screen a drag over text must scroll the page rather than
+    // select in it, so there it is plain text; passages are copied through
+    // the selection bar instead.
+    enabled: !Theme.touch;
     color: Theme.text;
     selection-background-color: Theme.selection;
     selection-foreground-color: Theme.text;
@@ -261,13 +374,15 @@ export struct WordInfo {
 // ---------------------------------------------------------------------------
 // A small text button / pill.
 // ---------------------------------------------------------------------------
+// Hover tints are for a pointer: on a touch screen the last tap would leave
+// one behind, until the next.
 component Pill inherits Rectangle {
     in property <string> label;
     in property <bool> active;
     callback clicked;
-    height: 28px;
+    height: Theme.target;
     border-radius: 6px;
-    background: active ? Theme.accent-bg : (touch.has-hover ? Theme.panel-alt : transparent);
+    background: active ? Theme.accent-bg : ((touch.has-hover && !Theme.touch) ? Theme.panel-alt : transparent);
     border-width: 1px;
     border-color: active ? Theme.accent : Theme.border;
     HorizontalLayout {
@@ -277,7 +392,8 @@ component Pill inherits Rectangle {
             text: root.label;
             color: active ? Theme.accent : Theme.text;
             vertical-alignment: center;
-            font-size: 13px;
+            font-size: Theme.touch ? 15px : 13px;
+            font-weight: Theme.eink && active ? 700 : 400;
         }
     }
     touch := TouchArea { clicked => { root.clicked(); } }
@@ -304,7 +420,7 @@ component VerseNumber inherits Rectangle {
         width: 100%;
         height: 100%;
         text: root.label != "" ? root.label : root.verse;
-        color: ntouch.has-hover ? Theme.accent : Theme.verse-num;
+        color: (ntouch.has-hover && !Theme.touch) ? Theme.accent : Theme.verse-num;
         font-size: Theme.verse-number-size;
         font-weight: Passage.is-marked(root.column, root.verse) ? 700 : 400;
         horizontal-alignment: root.alignment;
@@ -343,7 +459,8 @@ component VerseCell inherits Rectangle {
 
     property <length> pad-x: 14px;
     property <length> pad-y: root.verse-row.tagged ? 5px : 4px;
-    property <length> number-width: (root.verse-row.tagged ? 26px : 30px) * Theme.zoom;
+    // a fingertip needs a wider number to tap
+    property <length> number-width: (root.verse-row.tagged ? 26px : 30px) * Theme.zoom + (Theme.touch ? 10px : 0px);
     property <length> gap: root.verse-row.tagged ? 8px : 10px;
     property <bool> trailing-number: root.verse-row.tagged && root.verse-row.rtl;
     property <length> body-x: root.pad-x + (root.trailing-number ? 0px : root.number-width + root.gap);
@@ -362,7 +479,7 @@ component VerseCell inherits Rectangle {
     }
     background: (root.target || root.marked) && root.verse-row.verse > 0
         ? Theme.accent-bg
-        : (!root.verse-row.tagged && root.verse-row.verse > 0 && vtouch.has-hover)
+        : (!root.verse-row.tagged && root.verse-row.verse > 0 && (vtouch.has-hover && !Theme.touch))
             ? Theme.panel
             : transparent;
 
@@ -424,6 +541,8 @@ component VerseCell inherits Rectangle {
             Menu {
                 MenuItem {
                     title: "Copy";
+                    // nothing can be selected in the text on a touch screen
+                    enabled: !Theme.touch;
                     activated => { prose.copy(); }
                 }
                 MenuItem {
@@ -443,6 +562,7 @@ component VerseCell inherits Rectangle {
             prose := SelectableText {
                 text: root.verse-row.text;
                 font-size: Theme.reading-size;
+                font-family: root.verse-row.rtl ? Theme.hebrew-font : Theme.reading-font;
                 wrap: word-wrap;
                 horizontal-alignment: root.verse-row.rtl ? right : left;
                 vertical-alignment: top;
@@ -488,7 +608,7 @@ component VerseCell inherits Rectangle {
                     ? transparent
                     : (root.column == root.selected-col && w.idx == root.selected-idx)
                         ? Theme.accent-bg
-                        : (wtouch.has-hover && !Passage.dragging ? Theme.panel-alt : transparent);
+                        : ((wtouch.has-hover && !Theme.touch) && !Passage.dragging ? Theme.panel-alt : transparent);
                 // A selection reads as one run, so its tint spans the
                 // gaps between words (half the line's spacing a side).
                 Rectangle {
@@ -503,6 +623,7 @@ component VerseCell inherits Rectangle {
                     Text {
                         text: w.text;
                         font-size: Theme.reading-size;
+                        font-family: root.verse-row.rtl ? Theme.hebrew-font : Theme.reading-font;
                         color: w.tagged ? Theme.text : Theme.muted;
                     }
                 }
@@ -513,15 +634,20 @@ component VerseCell inherits Rectangle {
                     x: 2px;
                     y: parent.height - 2px;
                     width: parent.width - 4px;
-                    height: 1px;
+                    height: Theme.eink ? 2px : 1px;
                     background: Theme.accent;
                 }
                 // Press starts a selection; dragging extends it; a
                 // release that never left the word is a click, which
-                // opens the word study.
+                // opens the word study. On a touch screen the press has
+                // to be held first (see `Passage`).
                 wtouch := TouchArea {
                     pointer-event(e) => {
-                        if (e.button == PointerEventButton.left && e.kind == PointerEventKind.down) {
+                        if (Theme.touch && e.button == PointerEventButton.left && e.kind == PointerEventKind.down) {
+                            Passage.arm(root.column, w.idx,
+                                self.absolute-position.x + self.mouse-x,
+                                self.absolute-position.y + self.mouse-y);
+                        } else if (e.button == PointerEventButton.left && e.kind == PointerEventKind.down) {
                             Passage.press(root.column, w.idx,
                                 self.absolute-position.x + self.mouse-x,
                                 self.absolute-position.y + self.mouse-y);
@@ -599,6 +725,34 @@ component VerseScroller inherits Rectangle {
         list.content-y = 0px;
         root.seeking = root.target-index >= 0;
     }
+
+    /// The column that turns the chapter when paged past either end; the
+    /// others only follow.
+    in property <bool> leads: true;
+    property <int> page-watch: Paging.epoch;
+    changed page-watch => {
+        // a screenful less a couple of lines, so the last line read stays
+        // in sight
+        let step = max(list.visible-height - 3 * Theme.reading-size, list.visible-height / 2);
+        let bottom = min(0px, list.visible-height - list.content-height);
+        if (Paging.direction > 0) {
+            if (list.content-y <= bottom + 1px) {
+                if (root.leads) {
+                    Paging.past(1);
+                }
+            } else {
+                list.content-y = max(bottom, list.content-y - step);
+            }
+        } else {
+            if (list.content-y >= -1px) {
+                if (root.leads) {
+                    Paging.past(-1);
+                }
+            } else {
+                list.content-y = min(0px, list.content-y + step);
+            }
+        }
+    }
     // Created with a target already set (the locked/unlocked views swapping):
     // a change handler would only see edits made after creation.
     init => { root.seeking = root.target-index >= 0; }
@@ -633,6 +787,7 @@ component VerseScroller inherits Rectangle {
 component ReadingColumn inherits VerseScroller {
     in property <[VerseRow]> rows;
     in property <int> column;
+    leads: root.column == 0;
     in property <int> selected-col;
     in property <int> selected-idx;
     callback pick(int, int);
@@ -781,7 +936,7 @@ component GlossPane inherits Rectangle {
         ListView {
             vertical-stretch: 1;
             for g in root.notes: Rectangle {
-                background: gtouch.has-hover ? Theme.panel-alt : transparent;
+                background: (gtouch.has-hover && !Theme.touch) ? Theme.panel-alt : transparent;
                 border-radius: 4px;
                 gtouch := TouchArea { }
                 // No `alignment` — the columns have to line up down the
@@ -808,6 +963,7 @@ component GlossPane inherits Rectangle {
                         width: 110px;
                         color: Theme.text;
                         font-size: Theme.reading-size;
+                        font-family: g.rtl ? Theme.hebrew-font : Theme.reading-font;
                         horizontal-alignment: g.rtl ? right : left;
                     }
                     SelectableText {
@@ -815,6 +971,7 @@ component GlossPane inherits Rectangle {
                         width: 100px;
                         color: Theme.muted;
                         font-size: 15px;
+                        font-family: g.rtl ? Theme.hebrew-font : Theme.reading-font;
                         horizontal-alignment: g.rtl ? right : left;
                     }
                     SelectableText {
@@ -948,6 +1105,443 @@ component ParallelColumns inherits Rectangle {
 }
 
 // ---------------------------------------------------------------------------
+// The book and chapter lists, with the reader's cut-off: beside the text, or
+// over it on a narrow screen.
+// ---------------------------------------------------------------------------
+component Sidebar inherits Rectangle {
+    in property <bool> reader-on;
+    in property <[string]> threshold-labels;
+    in property <int> threshold-index;
+    in property <[BookItem]> books;
+    in property <[int]> chapters;
+    in property <int> current-book;
+    in property <int> current-chapter;
+    callback threshold-changed(int);
+    callback select-book(int);
+    callback select-chapter(int);
+
+    background: Theme.panel;
+    VerticalLayout {
+        padding: 10px;
+        spacing: 8px;
+
+        if root.reader-on: Text {
+            text: "Gloss words rarer than";
+            color: Theme.muted;
+            font-size: 11px;
+        }
+        if root.reader-on: ComboBox {
+            model: root.threshold-labels;
+            current-index: root.threshold-index;
+            selected(v) => { root.threshold-changed(self.current-index); }
+        }
+
+        Rectangle { height: 1px; background: Theme.border; }
+
+        // book list
+        Text { text: "Books"; color: Theme.muted; font-size: 11px; }
+        ListView {
+            vertical-stretch: 1;
+            for b[i] in root.books: Rectangle {
+                height: b.header ? 30px : (Theme.touch ? 44px : 26px);
+                background: (!b.header && b.nr == root.current-book)
+                    ? Theme.accent-bg
+                    : ((btouch.has-hover && !Theme.touch) && !b.header ? Theme.panel-alt : transparent);
+                border-radius: 5px;
+                HorizontalLayout {
+                    padding-left: b.header ? 4px : 12px;
+                    Text {
+                        text: b.name;
+                        vertical-alignment: center;
+                        font-size: b.header ? 11px : (Theme.touch ? 17px : 14px);
+                        font-weight: b.header ? 700 : 400;
+                        color: b.header
+                            ? Theme.muted
+                            : (b.nr == root.current-book ? Theme.accent : Theme.text);
+                    }
+                }
+                btouch := TouchArea {
+                    enabled: !b.header;
+                    clicked => { root.select-book(b.nr); }
+                }
+            }
+        }
+
+        // chapter grid
+        Text {
+            text: "Chapters";
+            color: Theme.muted;
+            font-size: 11px;
+            visible: root.chapters.length > 0;
+        }
+        // Sizes to fit all chapters; caps and scrolls only when the
+        // grid would get too tall (e.g. Psalms' 150 chapters).
+        // content-height must be set explicitly: the cells are
+        // absolutely positioned, so the ScrollView can't infer it.
+        csv := ScrollView {
+            // the tablet's sidebar is 330px wide: six cells a row, each big
+            // enough for a fingertip
+            property <int> cols: Theme.touch ? 6 : 7;
+            property <length> cell: Theme.touch ? 50px : 34px;
+            property <length> content-h: Math.ceil(root.chapters.length / self.cols) * self.cell;
+            visible: root.chapters.length > 0;
+            content-width: self.cols * self.cell;
+            content-height: self.content-h;
+            height: Math.min(self.content-h + 2px, Theme.touch ? 410px : 300px);
+            for ch[i] in root.chapters: Rectangle {
+                x: Math.mod(i, csv.cols) * csv.cell;
+                y: Math.floor(i / csv.cols) * csv.cell;
+                width: csv.cell - 4px;
+                height: csv.cell - 4px;
+                border-radius: 5px;
+                border-width: 1px;
+                border-color: ch == root.current-chapter ? Theme.accent : Theme.border;
+                background: ch == root.current-chapter
+                    ? Theme.accent-bg
+                    : ((chtouch.has-hover && !Theme.touch) ? Theme.panel-alt : transparent);
+                Text {
+                    text: ch;
+                    font-size: Theme.touch ? 16px : 12px;
+                    color: ch == root.current-chapter ? Theme.accent : Theme.text;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                chtouch := TouchArea { clicked => { root.select-chapter(ch); } }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Word study: the clicked word, its lexicon entry, and the original-language
+// word(s) and ancient versions behind it.
+// ---------------------------------------------------------------------------
+component WordPanel inherits Rectangle {
+    in property <WordInfo> word;
+    callback close();
+
+    background: Theme.panel;
+    VerticalLayout {
+        padding: 16px;
+        spacing: 10px;
+        HorizontalLayout {
+            Text {
+                text: "Word study";
+                color: Theme.muted;
+                font-size: 12px;
+                font-weight: 700;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            Pill { label: "✕"; clicked => { root.close(); } }
+        }
+        SelectableText {
+            text: root.word.surface;
+            color: Theme.text;
+            font-size: 30px;
+            font-family: root.word.rtl ? Theme.hebrew-font : Theme.reading-font;
+            horizontal-alignment: root.word.rtl ? right : left;
+        }
+        if root.word.translit != "": SelectableText {
+            text: root.word.translit;
+            color: Theme.muted;
+            font-size: 15px;
+        }
+        if root.word.strongs != "": HorizontalLayout {
+            spacing: 8px;
+            Rectangle {
+                background: Theme.accent-bg;
+                border-radius: 5px;
+                height: 22px;
+                horizontal-stretch: 0;
+                HorizontalLayout {
+                    padding-left: 8px;
+                    padding-right: 8px;
+                    SelectableText {
+                        text: root.word.strongs;
+                        color: Theme.accent;
+                        font-size: 13px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+            SelectableText {
+                text: root.word.lemma;
+                font-family: root.word.orig-rtl ? Theme.hebrew-font : Theme.reading-font;
+                color: Theme.text;
+                font-size: 18px;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+        }
+        if root.word.parsing != "": SelectableText {
+            text: root.word.parsing;
+            color: Theme.accent;
+            font-size: 14px;
+            wrap: word-wrap;
+        }
+        // matching original-language word(s) — reverse interlinear
+        if root.word.originals-label != "": Text {
+            text: root.word.originals-label;
+            color: Theme.muted;
+            font-size: 11px;
+            font-weight: 700;
+        }
+        for o in root.word.originals: HorizontalLayout {
+            spacing: 10px;
+            SelectableText {
+                text: o.text;
+                font-family: root.word.orig-rtl ? Theme.hebrew-font : Theme.reading-font;
+                color: Theme.accent;
+                font-size: 22px;
+            }
+            SelectableText {
+                text: o.parsing;
+                color: Theme.muted;
+                font-size: 12px;
+                vertical-alignment: center;
+                wrap: word-wrap;
+                horizontal-stretch: 1;
+            }
+        }
+        if root.word.gloss != "": SelectableText {
+            text: root.word.gloss;
+            color: Theme.text;
+            font-size: 15px;
+            font-weight: 600;
+            wrap: word-wrap;
+        }
+        Rectangle { height: 1px; background: Theme.border; }
+        ScrollView {
+            vertical-stretch: 1;
+            VerticalLayout {
+                width: 100%;
+                spacing: 8px;
+                // the entry reads from the top; slack goes
+                // below it, not between its parts
+                alignment: start;
+                SelectableText {
+                    width: 100%;
+                    text: root.word.definition;
+                    color: Theme.muted;
+                    font-size: 14px;
+                    wrap: word-wrap;
+                }
+                if root.word.show-lxx: Text {
+                    text: "Septuagint (LXX)";
+                    color: Theme.muted;
+                    font-size: 11px;
+                    font-weight: 700;
+                }
+                if root.word.show-lxx: SelectableText {
+                    width: 100%;
+                    text: root.word.lxx;
+                    font-family: Theme.reading-font;
+                    color: Theme.text;
+                    font-size: 16px;
+                    wrap: word-wrap;
+                }
+                if root.word.show-vulgate: Text {
+                    text: "Vulgate (Latin)";
+                    color: Theme.muted;
+                    font-size: 11px;
+                    font-weight: 700;
+                }
+                if root.word.show-vulgate: SelectableText {
+                    width: 100%;
+                    text: root.word.vulgate;
+                    font-family: Theme.reading-font;
+                    color: Theme.text;
+                    font-size: 15px;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The advanced-search reference card, a column at a time. The card lays the
+// three side by side, or one above another on a narrow screen.
+// ---------------------------------------------------------------------------
+component QueryWords inherits VerticalLayout {
+    spacing: 3px;
+    alignment: start;
+    Text { text: "ONE WORD"; color: Theme.muted; font-size: 10px; font-weight: 700; }
+    HorizontalLayout { spacing: 10px;
+        Text { text: "G25   H430"; width: 140px; color: Theme.accent; font-size: 11px; font-weight: 600; }
+        Text { text: "Strong's number"; color: Theme.text; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; min-width: 0px; }
+    }
+    HorizontalLayout { spacing: 10px;
+        Text { text: "lemma:ἀγαπάω"; width: 140px; color: Theme.accent; font-size: 11px; font-weight: 600; }
+        Text { text: "dictionary form (accents optional)"; color: Theme.text; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; min-width: 0px; }
+    }
+    HorizontalLayout { spacing: 10px;
+        Text { text: "gloss:love"; width: 140px; color: Theme.accent; font-size: 11px; font-weight: 600; }
+        Text { text: "lexemes whose gloss says it"; color: Theme.text; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; min-width: 0px; }
+    }
+    HorizontalLayout { spacing: 10px;
+        Text { text: "θεο*   “ὁ θεός”"; width: 140px; color: Theme.accent; font-size: 11px; font-weight: 600; }
+        Text { text: "surface prefix · exact phrase"; color: Theme.text; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; min-width: 0px; }
+    }
+    HorizontalLayout { spacing: 10px;
+        Text { text: "[G25 aorist active]"; width: 140px; color: Theme.accent; font-size: 11px; font-weight: 600; }
+        Text { text: "several constraints on the SAME word"; color: Theme.text; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; min-width: 0px; }
+    }
+}
+
+component QueryMorphology inherits VerticalLayout {
+    spacing: 3px;
+    alignment: start;
+    Text { text: "MORPHOLOGY — field:value, or just the value"; color: Theme.muted; font-size: 10px; font-weight: 700; }
+    HorizontalLayout { spacing: 10px;
+        Text { text: "pos:"; width: 140px; color: Theme.accent; font-size: 11px; font-weight: 600; }
+        Text { text: "verb noun adjective article pronoun preposition conjunction adverb particle name"; color: Theme.text; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; min-width: 0px; }
+    }
+    HorizontalLayout { spacing: 10px;
+        Text { text: "tense:"; width: 140px; color: Theme.accent; font-size: 11px; font-weight: 600; }
+        Text { text: "present imperfect future aorist perfect pluperfect · wayyiqtol weqatal cohortative jussive"; color: Theme.text; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; min-width: 0px; }
+    }
+    HorizontalLayout { spacing: 10px;
+        Text { text: "voice: mood: case:"; width: 140px; color: Theme.accent; font-size: 11px; font-weight: 600; }
+        Text { text: "active middle passive · indicative imperative subjunctive optative infinitive participle · nominative genitive dative accusative vocative"; color: Theme.text; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; min-width: 0px; }
+    }
+    HorizontalLayout { spacing: 10px;
+        Text { text: "number: gender: person:"; width: 140px; color: Theme.accent; font-size: 11px; font-weight: 600; }
+        Text { text: "singular plural dual · masculine feminine neuter · 1 2 3"; color: Theme.text; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; min-width: 0px; }
+    }
+    HorizontalLayout { spacing: 10px;
+        Text { text: "stem: state:"; width: 140px; color: Theme.accent; font-size: 11px; font-weight: 600; }
+        Text { text: "qal niphal piel hiphil hophal hithpael … · absolute construct · alternate with |: tense:aorist|perfect"; color: Theme.text; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; min-width: 0px; }
+    }
+}
+
+component QueryCombining inherits VerticalLayout {
+    spacing: 3px;
+    alignment: start;
+    callback try(string);
+    Text { text: "COMBINING"; color: Theme.muted; font-size: 10px; font-weight: 700; }
+    HorizontalLayout { spacing: 10px;
+        Text { text: "A B · A AND B"; width: 140px; color: Theme.accent; font-size: 11px; font-weight: 600; }
+        Text { text: "both in the verse"; color: Theme.text; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; min-width: 0px; }
+    }
+    HorizontalLayout { spacing: 10px;
+        Text { text: "A OR B · NOT A · ( )"; width: 140px; color: Theme.accent; font-size: 11px; font-weight: 600; }
+        Text { text: "either · exclude · group"; color: Theme.text; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; min-width: 0px; }
+    }
+    HorizontalLayout { spacing: 10px;
+        Text { text: "A BEFORE/2 B"; width: 140px; color: Theme.accent; font-size: 11px; font-weight: 600; }
+        Text { text: "A within two words before B · AFTER/n · NEAR/n either side · no /n = anywhere in the verse"; color: Theme.text; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; min-width: 0px; }
+    }
+    Text { text: "TRY"; color: Theme.muted; font-size: 10px; font-weight: 700; }
+    VerticalLayout {
+        spacing: 4px;
+        alignment: start;
+        Pill { label: "[G25 aorist]"; clicked => { root.try("[G25 aorist]"); } }
+        Pill { label: "[verb aorist] BEFORE/1 lemma:θεός"; clicked => { root.try("[verb aorist] BEFORE/1 lemma:θεός"); } }
+        Pill { label: "[H430 plural] NEAR/2 [verb hiphil]"; clicked => { root.try("[H430 plural] NEAR/2 [verb hiphil]"); } }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The toolbar's buttons: in the top bar, or on a row of their own on a narrow
+// screen.
+// ---------------------------------------------------------------------------
+component Tools inherits HorizontalLayout {
+    in property <bool> advanced;
+    in-out property <bool> show-import;
+    in property <bool> can-import;
+    in property <int> column-count;
+    in property <bool> reader-available;
+    in property <bool> reader;
+    in property <bool> scroll-lock;
+    /// Short labels, to fit a narrow screen.
+    in property <bool> short;
+    callback toggle-advanced();
+    callback add-column();
+    callback toggle-reader();
+    callback toggle-scroll-lock();
+    callback toggle-theme();
+    callback zoom-changed();
+
+    spacing: root.short ? 8px : 12px;
+    // Each item is vertically centered so the buttons share one baseline
+    // with the search box.
+    VerticalLayout {
+        alignment: center;
+        Pill {
+            label: root.short ? "⌕ Query" : root.advanced ? "⌕ Advanced ✓" : "⌕ Advanced";
+            active: root.advanced;
+            clicked => { root.toggle-advanced(); }
+        }
+    }
+    if root.can-import: VerticalLayout {
+        alignment: center;
+        Pill {
+            label: "⇪ Import";
+            active: root.show-import;
+            clicked => { root.show-import = !root.show-import; }
+        }
+    }
+    // Four columns at most: beyond that a verse is a word or two per line.
+    if root.column-count < 4: VerticalLayout {
+        alignment: center;
+        Pill {
+            label: "＋ Column";
+            clicked => { root.add-column(); }
+        }
+    }
+    if root.reader-available: VerticalLayout {
+        alignment: center;
+        Pill {
+            label: root.short ? "📖 Reader" : root.reader ? "📖 Reader ✓" : "📖 Reader";
+            active: root.reader;
+            clicked => { root.toggle-reader(); }
+        }
+    }
+    if root.column-count > 1: VerticalLayout {
+        alignment: center;
+        Pill {
+            label: root.scroll-lock ? "🔗 Linked" : "⛓ Unlinked";
+            active: root.scroll-lock;
+            clicked => { root.toggle-scroll-lock(); }
+        }
+    }
+    // Text size: the keyboard has Ctrl+plus and Ctrl+minus, a touch screen a
+    // pinch and these.
+    if Theme.touch: VerticalLayout {
+        alignment: center;
+        Pill {
+            label: "A−";
+            clicked => {
+                Theme.zoom-by(-1);
+                root.zoom-changed();
+            }
+        }
+    }
+    if Theme.touch: VerticalLayout {
+        alignment: center;
+        Pill {
+            label: "A+";
+            clicked => {
+                Theme.zoom-by(1);
+                root.zoom-changed();
+            }
+        }
+    }
+    // Names the theme a click switches to: light, dark, and on a touch
+    // screen e-ink, in turn.
+    VerticalLayout {
+        alignment: center;
+        Pill {
+            label: Theme.eink ? "☀ Light" : !Theme.dark ? "🌙 Dark" : Theme.touch ? "◐ E-ink" : "☀ Light";
+            clicked => { root.toggle-theme(); }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Main window
 // ---------------------------------------------------------------------------
 export component MainWindow inherits Window {
@@ -955,8 +1549,9 @@ export component MainWindow inherits Window {
     icon: @image-url("icon.png");
     preferred-width: 1200px;
     preferred-height: 820px;
-    min-width: 720px;
-    min-height: 480px;
+    // a tablet's window is its screen, whichever way up
+    min-width: Theme.touch ? 0px : 720px;
+    min-height: Theme.touch ? 0px : 480px;
     background: Theme.bg;
 
     // --- data in from Rust ---
@@ -1012,6 +1607,33 @@ export component MainWindow inherits Window {
     in-out property <bool> advanced;
     property <bool> has-results: root.results.length > 0;
 
+    // --- tablet layout ---
+    /// Too narrow for the panes to sit beside the text (a tablet held
+    /// upright): the sidebar and the word study lie over it instead, and the
+    /// toolbar takes a row of its own.
+    ///
+    /// Set when the width changes rather than bound to it: the window's own
+    /// size is computed from a layout that `compact` rearranges, a loop a
+    /// binding cannot have.
+    out property <bool> compact;
+    function fit() {
+        root.compact = Theme.touch && root.width < 1100px;
+    }
+    changed width => { root.fit(); }
+    property <bool> touch-watch: Theme.touch;
+    changed touch-watch => { root.fit(); }
+    /// The sidebar beside the text; a touch screen can fold it away.
+    in-out property <bool> show-sidebar: true;
+    property <bool> docked-sidebar: !root.compact && (!Theme.touch || root.show-sidebar);
+    /// The sidebar over the text, when compact.
+    in-out property <bool> drawer-open;
+    /// Importing needs a file dialog, which the tablet build does not have.
+    in property <bool> can-import: true;
+    /// First launch on a tablet: the database is being unpacked.
+    in property <bool> preparing;
+    in property <float> prepare-progress;
+    in property <string> prepare-error;
+
     // --- callbacks to Rust ---
     callback select-book(int);
     callback select-chapter(int);
@@ -1057,9 +1679,55 @@ export component MainWindow inherits Window {
     // The std-widgets (combo boxes, the search field) take their colours from
     // the *system* scheme, not from Theme, so in light mode they would keep
     // painting light text on our light panel. Keep the two in step.
-    property <bool> dark-watch: Theme.dark;
+    property <bool> dark-watch: Theme.dark-widgets;
     function sync-widget-scheme() {
-        Palette.color-scheme = Theme.dark ? ColorScheme.dark : ColorScheme.light;
+        Palette.color-scheme = Theme.dark-widgets ? ColorScheme.dark : ColorScheme.light;
+    }
+
+    /// An example from the reference card, into the search box.
+    function try-query(query: string) {
+        root.command = query;
+        root.focus-search += 1;
+    }
+
+    function toggle-sidebar() {
+        if (root.compact) {
+            root.drawer-open = !root.drawer-open;
+        } else {
+            root.show-sidebar = !root.show-sidebar;
+        }
+    }
+
+    /// Android's back key: closes whatever was opened last, and only then
+    /// leaves the app (false).
+    function go-back() -> bool {
+        if (root.show-import) {
+            if (root.import-stage != 2) {
+                root.show-import = false;
+            }
+            return true;
+        }
+        if (root.drawer-open) {
+            root.drawer-open = false;
+            return true;
+        }
+        if (root.show-word) {
+            root.close-word();
+            return true;
+        }
+        if (Passage.has-selection) {
+            Passage.clear();
+            return true;
+        }
+        if (root.advanced) {
+            root.toggle-advanced();
+            return true;
+        }
+        if (root.show-results) {
+            root.show-results = false;
+            return true;
+        }
+        false
     }
     changed dark-watch => { root.sync-widget-scheme(); }
     // Keys reach nothing unless something has focus, so start on the shortcut
@@ -1067,6 +1735,7 @@ export component MainWindow inherits Window {
     // keys in the capture phase before the box does.
     init => {
         root.sync-widget-scheme();
+        root.fit();
         shortcuts.focus();
     }
 
@@ -1084,6 +1753,16 @@ export component MainWindow inherits Window {
         clipper.select-all();
         clipper.copy();
     }
+    // Touch: a word held this long starts a selection. The press reaches the
+    // word 100 ms after the finger lands (the scroller waits that long to see
+    // whether it is a drag), and the scroller stops claiming drags 500 ms in,
+    // so the hold ends just after: from then on, a drag selects.
+    Timer {
+        interval: 450ms;
+        running: Passage.armed;
+        triggered => { Passage.hold(); }
+    }
+
     // Starting a selection takes the keys back from any text selected before,
     // so the Ctrl+C that follows copies the new selection.
     property <int> focus-watch: Passage.focus-epoch;
@@ -1096,9 +1775,9 @@ export component MainWindow inherits Window {
             // Shift+=, so plain Ctrl+= is free to mean "reset".
             if (event.modifiers.control && (event.text == "+" || event.text == "-" || event.text == "=" || event.text == "0")) {
                 if (event.text == "+") {
-                    Theme.zoom = min(2.5, round(Theme.zoom * 10 + 1) / 10);
+                    Theme.zoom-by(1);
                 } else if (event.text == "-") {
-                    Theme.zoom = max(0.6, round(Theme.zoom * 10 - 1) / 10);
+                    Theme.zoom-by(-1);
                 } else {
                     Theme.zoom = 1.0;
                 }
@@ -1112,6 +1791,15 @@ export component MainWindow inherits Window {
                     root.focus-search += 1;
                 }
                 return accept;
+            }
+            // Page Down / Page Up — also what the page-turn buttons of many
+            // e-readers send — read on a screenful at a time.
+            if (!root.show-results && (event.text == Key.PageDown || event.text == Key.PageUp)) {
+                Paging.turn(event.text == Key.PageDown ? 1 : -1);
+                return accept;
+            }
+            if (event.text == Key.Back) {
+                return root.go-back() ? accept : reject;
             }
             reject
         }
@@ -1131,7 +1819,7 @@ export component MainWindow inherits Window {
         VerticalLayout {
             // ---------------- Top bar ----------------
             Rectangle {
-                height: 52px;
+                height: Theme.touch ? 60px : 52px;
                 background: Theme.panel;
                 border-width: 0px;
                 HorizontalLayout {
@@ -1139,7 +1827,16 @@ export component MainWindow inherits Window {
                     padding-right: 14px;
                     spacing: 12px;
                     // Each item is vertically centered so the logo, search box and
-                    // buttons share one baseline across the 52px bar.
+                    // buttons share one baseline across the bar.
+                    // A touch screen can fold the sidebar away.
+                    if Theme.touch: VerticalLayout {
+                        alignment: center;
+                        Pill {
+                            label: "☰ Books";
+                            active: root.compact ? root.drawer-open : root.show-sidebar;
+                            clicked => { root.toggle-sidebar(); }
+                        }
+                    }
                     HorizontalLayout {
                         spacing: 8px;
                         VerticalLayout {
@@ -1150,7 +1847,7 @@ export component MainWindow inherits Window {
                                 height: 28px;
                             }
                         }
-                        VerticalLayout {
+                        if !root.compact: VerticalLayout {
                             alignment: center;
                             Text {
                                 text: "LeVerbe";
@@ -1168,59 +1865,54 @@ export component MainWindow inherits Window {
                         VerticalLayout {
                             alignment: center;
                             cmd := LineEdit {
-                                placeholder-text: "Go to reference (John 3:16), search, or query — Ctrl+Shift+F for the language";
+                                placeholder-text: Theme.touch
+                                    ? "Go to a reference (John 3:16), or search"
+                                    : "Go to reference (John 3:16), search, or query — Ctrl+Shift+F for the language";
                                 text <=> root.command;
                                 accepted(t) => { root.go(t); }
                             }
                         }
                     }
-                    VerticalLayout {
-                        alignment: center;
-                        Pill {
-                            label: root.advanced ? "⌕ Advanced ✓" : "⌕ Advanced";
-                            active: root.advanced;
-                            clicked => { root.toggle-advanced(); }
-                        }
+                    if !root.compact: Tools {
+                        advanced: root.advanced;
+                        show-import <=> root.show-import;
+                        can-import: root.can-import;
+                        column-count: root.columns.length;
+                        reader-available: root.reader-available;
+                        reader: root.reader;
+                        scroll-lock: root.scroll-lock;
+                        toggle-advanced => { root.toggle-advanced(); }
+                        add-column => { root.add-column(); }
+                        toggle-reader => { root.toggle-reader(); }
+                        toggle-scroll-lock => { root.toggle-scroll-lock(); }
+                        toggle-theme => { root.toggle-theme(); }
+                        zoom-changed => { root.zoom-changed(); }
                     }
-                    VerticalLayout {
-                        alignment: center;
-                        Pill {
-                            label: "⇪ Import";
-                            active: root.show-import;
-                            clicked => { root.show-import = !root.show-import; }
-                        }
-                    }
-                    // Four columns at most: beyond that a verse is a word or
-                    // two per line.
-                    if root.columns.length < 4: VerticalLayout {
-                        alignment: center;
-                        Pill {
-                            label: "＋ Column";
-                            clicked => { root.add-column(); }
-                        }
-                    }
-                    if root.reader-available: VerticalLayout {
-                        alignment: center;
-                        Pill {
-                            label: root.reader ? "📖 Reader ✓" : "📖 Reader";
-                            active: root.reader;
-                            clicked => { root.toggle-reader(); }
-                        }
-                    }
-                    if root.columns.length > 1: VerticalLayout {
-                        alignment: center;
-                        Pill {
-                            label: root.scroll-lock ? "🔗 Linked" : "⛓ Unlinked";
-                            active: root.scroll-lock;
-                            clicked => { root.toggle-scroll-lock(); }
-                        }
-                    }
-                    VerticalLayout {
-                        alignment: center;
-                        Pill {
-                            label: Theme.dark ? "☀ Light" : "🌙 Dark";
-                            clicked => { root.toggle-theme(); }
-                        }
+                }
+            }
+            // narrow: the buttons on a row of their own
+            if root.compact: Rectangle {
+                height: Theme.target + 12px;
+                background: Theme.panel;
+                HorizontalLayout {
+                    padding-left: 14px;
+                    padding-right: 14px;
+                    alignment: start;
+                    Tools {
+                        short: true;
+                        advanced: root.advanced;
+                        show-import <=> root.show-import;
+                        can-import: root.can-import;
+                        column-count: root.columns.length;
+                        reader-available: root.reader-available;
+                        reader: root.reader;
+                        scroll-lock: root.scroll-lock;
+                        toggle-advanced => { root.toggle-advanced(); }
+                        add-column => { root.add-column(); }
+                        toggle-reader => { root.toggle-reader(); }
+                        toggle-scroll-lock => { root.toggle-scroll-lock(); }
+                        toggle-theme => { root.toggle-theme(); }
+                        zoom-changed => { root.zoom-changed(); }
                     }
                 }
             }
@@ -1246,92 +1938,22 @@ export component MainWindow inherits Window {
                         }
                         Pill { label: "✕"; clicked => { root.toggle-advanced(); } }
                     }
-                    HorizontalLayout {
+                    if !root.compact: HorizontalLayout {
                         spacing: 28px;
-                        VerticalLayout {
-                            spacing: 3px;
+                        QueryWords { horizontal-stretch: 1; preferred-width: 0px; min-width: 0px; }
+                        QueryMorphology { horizontal-stretch: 1; preferred-width: 0px; min-width: 0px; }
+                        QueryCombining {
                             horizontal-stretch: 1;
                             preferred-width: 0px;
                             min-width: 0px;
-                            alignment: start;
-                            Text { text: "ONE WORD"; color: Theme.muted; font-size: 10px; font-weight: 700; }
-                            HorizontalLayout { spacing: 10px;
-                                Text { text: "G25   H430"; width: 140px; color: Theme.accent; font-size: 11px; font-weight: 600; }
-                                Text { text: "Strong's number"; color: Theme.text; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; min-width: 0px; }
-                            }
-                            HorizontalLayout { spacing: 10px;
-                                Text { text: "lemma:ἀγαπάω"; width: 140px; color: Theme.accent; font-size: 11px; font-weight: 600; }
-                                Text { text: "dictionary form (accents optional)"; color: Theme.text; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; min-width: 0px; }
-                            }
-                            HorizontalLayout { spacing: 10px;
-                                Text { text: "gloss:love"; width: 140px; color: Theme.accent; font-size: 11px; font-weight: 600; }
-                                Text { text: "lexemes whose gloss says it"; color: Theme.text; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; min-width: 0px; }
-                            }
-                            HorizontalLayout { spacing: 10px;
-                                Text { text: "θεο*   “ὁ θεός”"; width: 140px; color: Theme.accent; font-size: 11px; font-weight: 600; }
-                                Text { text: "surface prefix · exact phrase"; color: Theme.text; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; min-width: 0px; }
-                            }
-                            HorizontalLayout { spacing: 10px;
-                                Text { text: "[G25 aorist active]"; width: 140px; color: Theme.accent; font-size: 11px; font-weight: 600; }
-                                Text { text: "several constraints on the SAME word"; color: Theme.text; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; min-width: 0px; }
-                            }
+                            try(q) => { root.try-query(q); }
                         }
-                        VerticalLayout {
-                            spacing: 3px;
-                            horizontal-stretch: 1;
-                            preferred-width: 0px;
-                            min-width: 0px;
-                            alignment: start;
-                            Text { text: "MORPHOLOGY — field:value, or just the value"; color: Theme.muted; font-size: 10px; font-weight: 700; }
-                            HorizontalLayout { spacing: 10px;
-                                Text { text: "pos:"; width: 140px; color: Theme.accent; font-size: 11px; font-weight: 600; }
-                                Text { text: "verb noun adjective article pronoun preposition conjunction adverb particle name"; color: Theme.text; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; min-width: 0px; }
-                            }
-                            HorizontalLayout { spacing: 10px;
-                                Text { text: "tense:"; width: 140px; color: Theme.accent; font-size: 11px; font-weight: 600; }
-                                Text { text: "present imperfect future aorist perfect pluperfect · wayyiqtol weqatal cohortative jussive"; color: Theme.text; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; min-width: 0px; }
-                            }
-                            HorizontalLayout { spacing: 10px;
-                                Text { text: "voice: mood: case:"; width: 140px; color: Theme.accent; font-size: 11px; font-weight: 600; }
-                                Text { text: "active middle passive · indicative imperative subjunctive optative infinitive participle · nominative genitive dative accusative vocative"; color: Theme.text; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; min-width: 0px; }
-                            }
-                            HorizontalLayout { spacing: 10px;
-                                Text { text: "number: gender: person:"; width: 140px; color: Theme.accent; font-size: 11px; font-weight: 600; }
-                                Text { text: "singular plural dual · masculine feminine neuter · 1 2 3"; color: Theme.text; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; min-width: 0px; }
-                            }
-                            HorizontalLayout { spacing: 10px;
-                                Text { text: "stem: state:"; width: 140px; color: Theme.accent; font-size: 11px; font-weight: 600; }
-                                Text { text: "qal niphal piel hiphil hophal hithpael … · absolute construct · alternate with |: tense:aorist|perfect"; color: Theme.text; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; min-width: 0px; }
-                            }
-                        }
-                        VerticalLayout {
-                            spacing: 3px;
-                            horizontal-stretch: 1;
-                            preferred-width: 0px;
-                            min-width: 0px;
-                            alignment: start;
-                            Text { text: "COMBINING"; color: Theme.muted; font-size: 10px; font-weight: 700; }
-                            HorizontalLayout { spacing: 10px;
-                                Text { text: "A B · A AND B"; width: 140px; color: Theme.accent; font-size: 11px; font-weight: 600; }
-                                Text { text: "both in the verse"; color: Theme.text; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; min-width: 0px; }
-                            }
-                            HorizontalLayout { spacing: 10px;
-                                Text { text: "A OR B · NOT A · ( )"; width: 140px; color: Theme.accent; font-size: 11px; font-weight: 600; }
-                                Text { text: "either · exclude · group"; color: Theme.text; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; min-width: 0px; }
-                            }
-                            HorizontalLayout { spacing: 10px;
-                                Text { text: "A BEFORE/2 B"; width: 140px; color: Theme.accent; font-size: 11px; font-weight: 600; }
-                                Text { text: "A within two words before B · AFTER/n · NEAR/n either side · no /n = anywhere in the verse"; color: Theme.text; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; min-width: 0px; }
-                            }
-                            Text { text: "TRY"; color: Theme.muted; font-size: 10px; font-weight: 700; }
-                            VerticalLayout {
-                                spacing: 4px;
-                                alignment: start;
-                                Pill { label: "[G25 aorist]"; clicked => { root.command = "[G25 aorist]"; root.focus-search += 1; } }
-                                Pill { label: "[verb aorist] BEFORE/1 lemma:θεός"; clicked => { root.command = "[verb aorist] BEFORE/1 lemma:θεός"; root.focus-search += 1; } }
-                                Pill { label: "[H430 plural] NEAR/2 [verb hiphil]"; clicked => { root.command = "[H430 plural] NEAR/2 [verb hiphil]"; root.focus-search += 1; } }
-                            }
-                        }
+                    }
+                    if root.compact: VerticalLayout {
+                        spacing: 12px;
+                        QueryWords { }
+                        QueryMorphology { }
+                        QueryCombining { try(q) => { root.try-query(q); } }
                     }
                 }
             }
@@ -1340,98 +1962,20 @@ export component MainWindow inherits Window {
             // ---------------- Body ----------------
             HorizontalLayout {
                 // -------- Sidebar --------
-                Rectangle {
-                    width: 270px;
-                    background: Theme.panel;
-                    VerticalLayout {
-                        padding: 10px;
-                        spacing: 8px;
-
-                        if root.reader && root.reader-available: Text {
-                            text: "Gloss words rarer than";
-                            color: Theme.muted;
-                            font-size: 11px;
-                        }
-                        if root.reader && root.reader-available: ComboBox {
-                            model: root.threshold-labels;
-                            current-index: root.threshold-index;
-                            selected(v) => { root.threshold-changed(self.current-index); }
-                        }
-
-                        Rectangle { height: 1px; background: Theme.border; }
-
-                        // book list
-                        Text { text: "Books"; color: Theme.muted; font-size: 11px; }
-                        ListView {
-                            vertical-stretch: 1;
-                            for b[i] in root.books: Rectangle {
-                                height: b.header ? 30px : 26px;
-                                background: (!b.header && b.nr == root.current-book)
-                                    ? Theme.accent-bg
-                                    : (btouch.has-hover && !b.header ? Theme.panel-alt : transparent);
-                                border-radius: 5px;
-                                HorizontalLayout {
-                                    padding-left: b.header ? 4px : 12px;
-                                    Text {
-                                        text: b.name;
-                                        vertical-alignment: center;
-                                        font-size: b.header ? 11px : 14px;
-                                        font-weight: b.header ? 700 : 400;
-                                        color: b.header
-                                            ? Theme.muted
-                                            : (b.nr == root.current-book ? Theme.accent : Theme.text);
-                                    }
-                                }
-                                btouch := TouchArea {
-                                    enabled: !b.header;
-                                    clicked => { root.select-book(b.nr); }
-                                }
-                            }
-                        }
-
-                        // chapter grid
-                        Text {
-                            text: "Chapters";
-                            color: Theme.muted;
-                            font-size: 11px;
-                            visible: root.chapters.length > 0;
-                        }
-                        // Sizes to fit all chapters; caps and scrolls only when the
-                        // grid would get too tall (e.g. Psalms' 150 chapters).
-                        // content-height must be set explicitly: the cells are
-                        // absolutely positioned, so the ScrollView can't infer it.
-                        csv := ScrollView {
-                            property <int> cols: 7;
-                            property <length> cell: 34px;
-                            property <length> content-h: Math.ceil(root.chapters.length / self.cols) * self.cell;
-                            visible: root.chapters.length > 0;
-                            content-width: self.cols * self.cell;
-                            content-height: self.content-h;
-                            height: Math.min(self.content-h + 2px, 300px);
-                            for ch[i] in root.chapters: Rectangle {
-                                x: Math.mod(i, csv.cols) * csv.cell;
-                                y: Math.floor(i / csv.cols) * csv.cell;
-                                width: csv.cell - 4px;
-                                height: csv.cell - 4px;
-                                border-radius: 5px;
-                                border-width: 1px;
-                                border-color: ch == root.current-chapter ? Theme.accent : Theme.border;
-                                background: ch == root.current-chapter
-                                    ? Theme.accent-bg
-                                    : (chtouch.has-hover ? Theme.panel-alt : transparent);
-                                Text {
-                                    text: ch;
-                                    font-size: 12px;
-                                    color: ch == root.current-chapter ? Theme.accent : Theme.text;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
-                                chtouch := TouchArea { clicked => { root.select-chapter(ch); } }
-                            }
-                        }
-                    }
+                if root.docked-sidebar: Sidebar {
+                    width: Theme.touch ? 330px : 270px;
+                    reader-on: root.reader && root.reader-available;
+                    threshold-labels: root.threshold-labels;
+                    threshold-index: root.threshold-index;
+                    books: root.books;
+                    chapters: root.chapters;
+                    current-book: root.current-book;
+                    current-chapter: root.current-chapter;
+                    threshold-changed(i) => { root.threshold-changed(i); }
+                    select-book(nr) => { root.select-book(nr); }
+                    select-chapter(ch) => { root.select-chapter(ch); }
                 }
-                Rectangle { width: 1px; background: Theme.border; }
+                if root.docked-sidebar: Rectangle { width: 1px; background: Theme.border; }
 
                 // -------- Reading / results area --------
                 Rectangle {
@@ -1471,7 +2015,7 @@ export component MainWindow inherits Window {
                             changed search-watch => { self.content-y = 0px; }
                             for r[i] in root.results: Rectangle {
                                 height: rlayout.preferred-height;
-                                background: rtouch.has-hover ? Theme.panel : transparent;
+                                background: (rtouch.has-hover && !Theme.touch) ? Theme.panel : transparent;
                                 border-radius: 6px;
                                 rlayout := VerticalLayout {
                                     padding: 8px;
@@ -1509,19 +2053,24 @@ export component MainWindow inherits Window {
                     // ----- Reading view -----
                     VerticalLayout {
                         visible: !root.show-results;
-                        // chapter header with prev/next
+                        // chapter header with prev/next, and on a touch screen
+                        // the page buttons
                         Rectangle {
-                            height: 44px;
+                            height: Theme.touch ? 56px : 44px;
                             HorizontalLayout {
+                                // the taller buttons centred in the taller bar
+                                padding-top: Theme.touch ? 8px : 0px;
+                                padding-bottom: Theme.touch ? 8px : 0px;
                                 padding-left: 16px;
                                 padding-right: 16px;
                                 spacing: 10px;
                                 if root.has-results: Pill {
-                                    label: "☰ Results";
+                                    label: root.compact ? "☰" : "☰ Results";
                                     active: true;
                                     clicked => { root.show-results = true; }
                                 }
-                                Pill { label: "‹ Prev"; clicked => { root.prev-chapter(); } }
+                                Pill { label: root.compact ? "‹" : "‹ Prev"; clicked => { root.prev-chapter(); } }
+                                if Theme.touch: Pill { label: "▲ Page"; clicked => { Paging.turn(-1); } }
                                 Text {
                                     text: root.primary-title;
                                     color: Theme.text;
@@ -1531,24 +2080,58 @@ export component MainWindow inherits Window {
                                     horizontal-stretch: 1;
                                     horizontal-alignment: center;
                                 }
-                                Pill { label: "Next ›"; clicked => { root.next-chapter(); } }
+                                if Theme.touch: Pill { label: "▼ Page"; clicked => { Paging.turn(1); } }
+                                Pill { label: root.compact ? "›" : "Next ›"; clicked => { root.next-chapter(); } }
                             }
                         }
                         Rectangle { height: 1px; background: Theme.border; }
 
-                        ParallelColumns {
+                        // A pinch sizes the text; it is applied when the
+                        // fingers lift, so the chapter is laid out once
+                        // rather than at every step — an e-ink screen would
+                        // redraw it each time.
+                        pinch := ScaleRotateGestureHandler {
                             vertical-stretch: 1;
-                            translation-labels: root.translation-labels;
-                            columns: root.columns;
-                            pairs: root.pairs;
-                            scroll-lock: root.scroll-lock;
-                            selected-col: root.selected-col;
-                            selected-idx: root.selected-idx;
-                            nav-epoch: root.nav-epoch;
-                            target-index: root.target-index;
-                            pick(c, i) => { root.word-clicked(c, i); }
-                            translation-changed(c, t) => { root.translation-changed(c, t); }
-                            remove-column(c) => { root.remove-column(c); }
+                            enabled: Theme.touch;
+                            property <float> base: 1.0;
+                            property <float> wanted: max(Theme.min-zoom, min(Theme.max-zoom, round(self.base * self.scale * 10) / 10));
+                            started => { self.base = Theme.zoom; }
+                            ended => {
+                                Theme.zoom = self.wanted;
+                                root.zoom-changed();
+                            }
+                            ParallelColumns {
+                                width: 100%;
+                                height: 100%;
+                                translation-labels: root.translation-labels;
+                                columns: root.columns;
+                                pairs: root.pairs;
+                                scroll-lock: root.scroll-lock;
+                                selected-col: root.selected-col;
+                                selected-idx: root.selected-idx;
+                                nav-epoch: root.nav-epoch;
+                                target-index: root.target-index;
+                                pick(c, i) => { root.word-clicked(c, i); }
+                                translation-changed(c, t) => { root.translation-changed(c, t); }
+                                remove-column(c) => { root.remove-column(c); }
+                            }
+                            if pinch.active: Rectangle {
+                                x: (parent.width - self.width) / 2;
+                                y: 24px;
+                                width: 140px;
+                                height: 40px;
+                                background: Theme.panel;
+                                border-width: 1px;
+                                border-color: Theme.border;
+                                border-radius: 8px;
+                                Text {
+                                    text: "Text " + round(pinch.wanted * 100) + "%";
+                                    color: Theme.text;
+                                    font-size: 15px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
                         }
 
                         if root.reader && root.reader-available: Rectangle {
@@ -1558,155 +2141,133 @@ export component MainWindow inherits Window {
                         if root.reader && root.reader-available: GlossPane {
                             // fixed, not a share of the parent: as a layout child, reading the
                             // parent's height here is a binding loop with the window's preferred size
-                            height: 240px;
+                            // a tablet's page is taller, and its glosses
+                            // are read instead of a lexicon
+                            height: Theme.touch ? 380px : 240px;
                             notes: root.notes;
                             caption: root.reader-caption;
+                        }
+
+                        // Touch: what Ctrl+C and the right-click menus do,
+                        // for whatever is selected.
+                        if Theme.touch && Passage.has-selection: Rectangle {
+                            height: 1px;
+                            background: Theme.border;
+                        }
+                        if Theme.touch && Passage.has-selection: Rectangle {
+                            height: Theme.target + 16px;
+                            background: Theme.panel;
+                            HorizontalLayout {
+                                padding-left: 16px;
+                                padding-right: 16px;
+                                spacing: 10px;
+                                Text {
+                                    text: Passage.summary;
+                                    color: Theme.text;
+                                    font-size: 15px;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    Pill {
+                                        label: "Copy";
+                                        active: true;
+                                        clicked => {
+                                            Passage.copy-selection();
+                                            Passage.clear();
+                                        }
+                                    }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    Pill {
+                                        label: "Copy chapter";
+                                        clicked => {
+                                            Passage.copy-verses(max(Passage.column, Passage.word-column), 0, 0);
+                                            Passage.clear();
+                                        }
+                                    }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    Pill {
+                                        label: "✕";
+                                        clicked => { Passage.clear(); }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
 
                 // -------- Word-study panel --------
-                if root.show-word: Rectangle { width: 1px; background: Theme.border; }
-                if root.show-word: Rectangle {
+                if root.show-word && !root.compact: Rectangle { width: 1px; background: Theme.border; }
+                if root.show-word && !root.compact: WordPanel {
                     width: 340px;
-                    background: Theme.panel;
-                    VerticalLayout {
-                        padding: 16px;
-                        spacing: 10px;
-                        HorizontalLayout {
-                            Text {
-                                text: "Word study";
-                                color: Theme.muted;
-                                font-size: 12px;
-                                font-weight: 700;
-                                vertical-alignment: center;
-                                horizontal-stretch: 1;
-                            }
-                            Pill { label: "✕"; clicked => { root.close-word(); } }
-                        }
-                        SelectableText {
-                            text: root.word.surface;
-                            color: Theme.text;
-                            font-size: 30px;
-                            horizontal-alignment: root.word.rtl ? right : left;
-                        }
-                        if root.word.translit != "": SelectableText {
-                            text: root.word.translit;
-                            color: Theme.muted;
-                            font-size: 15px;
-                        }
-                        if root.word.strongs != "": HorizontalLayout {
-                            spacing: 8px;
-                            Rectangle {
-                                background: Theme.accent-bg;
-                                border-radius: 5px;
-                                height: 22px;
-                                horizontal-stretch: 0;
-                                HorizontalLayout {
-                                    padding-left: 8px;
-                                    padding-right: 8px;
-                                    SelectableText {
-                                        text: root.word.strongs;
-                                        color: Theme.accent;
-                                        font-size: 13px;
-                                        font-weight: 700;
-                                        vertical-alignment: center;
-                                    }
-                                }
-                            }
-                            SelectableText {
-                                text: root.word.lemma;
-                                color: Theme.text;
-                                font-size: 18px;
-                                vertical-alignment: center;
-                                horizontal-stretch: 1;
-                            }
-                        }
-                        if root.word.parsing != "": SelectableText {
-                            text: root.word.parsing;
-                            color: Theme.accent;
-                            font-size: 14px;
-                            wrap: word-wrap;
-                        }
-                        // matching original-language word(s) — reverse interlinear
-                        if root.word.originals-label != "": Text {
-                            text: root.word.originals-label;
-                            color: Theme.muted;
-                            font-size: 11px;
-                            font-weight: 700;
-                        }
-                        for o in root.word.originals: HorizontalLayout {
-                            spacing: 10px;
-                            SelectableText {
-                                text: o.text;
-                                color: Theme.accent;
-                                font-size: 22px;
-                            }
-                            SelectableText {
-                                text: o.parsing;
-                                color: Theme.muted;
-                                font-size: 12px;
-                                vertical-alignment: center;
-                                wrap: word-wrap;
-                                horizontal-stretch: 1;
-                            }
-                        }
-                        if root.word.gloss != "": SelectableText {
-                            text: root.word.gloss;
-                            color: Theme.text;
-                            font-size: 15px;
-                            font-weight: 600;
-                            wrap: word-wrap;
-                        }
-                        Rectangle { height: 1px; background: Theme.border; }
-                        ScrollView {
-                            vertical-stretch: 1;
-                            VerticalLayout {
-                                width: 100%;
-                                spacing: 8px;
-                                // the entry reads from the top; slack goes
-                                // below it, not between its parts
-                                alignment: start;
-                                SelectableText {
-                                    width: 100%;
-                                    text: root.word.definition;
-                                    color: Theme.muted;
-                                    font-size: 14px;
-                                    wrap: word-wrap;
-                                }
-                                if root.word.show-lxx: Text {
-                                    text: "Septuagint (LXX)";
-                                    color: Theme.muted;
-                                    font-size: 11px;
-                                    font-weight: 700;
-                                }
-                                if root.word.show-lxx: SelectableText {
-                                    width: 100%;
-                                    text: root.word.lxx;
-                                    color: Theme.text;
-                                    font-size: 16px;
-                                    wrap: word-wrap;
-                                }
-                                if root.word.show-vulgate: Text {
-                                    text: "Vulgate (Latin)";
-                                    color: Theme.muted;
-                                    font-size: 11px;
-                                    font-weight: 700;
-                                }
-                                if root.word.show-vulgate: SelectableText {
-                                    width: 100%;
-                                    text: root.word.vulgate;
-                                    color: Theme.text;
-                                    font-size: 15px;
-                                    wrap: word-wrap;
-                                }
-                            }
-                        }
-                    }
+                    word: root.word;
+                    close => { root.close-word(); }
                 }
             }
         }
-            // ---------------- Importing a translation: a card over the page ----------------
+
+        // ---------------- Narrow screen: the panes over the text ----------------
+        // They appear and go at once, with no slide: an e-ink screen would
+        // draw every step of one.
+        if root.compact && root.drawer-open: Rectangle {
+            // e-ink renders a translucent shade as grey speckle; a rule says
+            // as much
+            background: Theme.eink ? transparent : #00000055;
+            TouchArea { clicked => { root.drawer-open = false; } }
+            Sidebar {
+                x: 0;
+                width: min(330px, parent.width - 48px);
+                height: parent.height;
+                reader-on: root.reader && root.reader-available;
+                threshold-labels: root.threshold-labels;
+                threshold-index: root.threshold-index;
+                books: root.books;
+                chapters: root.chapters;
+                current-book: root.current-book;
+                current-chapter: root.current-chapter;
+                threshold-changed(i) => { root.threshold-changed(i); }
+                select-book(nr) => { root.select-book(nr); }
+                // a chapter is the last choice made here
+                select-chapter(ch) => {
+                    root.select-chapter(ch);
+                    root.drawer-open = false;
+                }
+                // clicks on the drawer stay on the drawer
+                TouchArea { z: -1; }
+            }
+            Rectangle {
+                x: min(330px, parent.width - 48px);
+                width: 1px;
+                height: parent.height;
+                background: Theme.border;
+            }
+        }
+        if root.compact && root.show-word: Rectangle {
+            background: Theme.eink ? transparent : #00000055;
+            TouchArea { clicked => { root.close-word(); } }
+            Rectangle {
+                x: parent.width - self.width;
+                width: 1px;
+                height: parent.height;
+                background: Theme.border;
+            }
+            WordPanel {
+                x: parent.width - self.width;
+                width: min(380px, parent.width - 48px);
+                height: parent.height;
+                word: root.word;
+                close => { root.close-word(); }
+                TouchArea { z: -1; }
+            }
+        }
+
+        // ---------------- Importing a translation: a card over the page ----------------
         if root.show-import: Rectangle {
             background: #00000088;
             // a click beside the card closes it, unless an import is running
@@ -1924,6 +2485,55 @@ export component MainWindow inherits Window {
                         font-size: 13px;
                         wrap: word-wrap;
                         preferred-width: 560px;
+                    }
+                }
+            }
+        }
+
+        // ---------------- First launch on a tablet: unpacking the Bible ----------------
+        if root.preparing: Rectangle {
+            background: Theme.bg;
+            // nothing underneath is ready to be touched
+            TouchArea { }
+            VerticalLayout {
+                alignment: center;
+                padding: 32px;
+                spacing: 16px;
+                HorizontalLayout {
+                    alignment: center;
+                    Image {
+                        source: @image-url("logo.svg");
+                        width: 64px;
+                        height: 64px;
+                    }
+                }
+                Text {
+                    text: root.prepare-error != "" ? "LeVerbe could not prepare its Bible" : "Preparing the Bible for first use…";
+                    color: Theme.text;
+                    font-size: 20px;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: root.prepare-error != "" ? root.prepare-error : "This happens once, and takes a minute at most.";
+                    color: root.prepare-error != "" ? Theme.danger : Theme.muted;
+                    font-size: 15px;
+                    wrap: word-wrap;
+                    horizontal-alignment: center;
+                }
+                // A bar that moves in steps rather than an animation: an
+                // e-ink screen redraws for every frame of one.
+                HorizontalLayout {
+                    alignment: center;
+                    if root.prepare-error == "": Rectangle {
+                        width: 320px;
+                        height: 10px;
+                        border-width: 1px;
+                        border-color: Theme.text;
+                        Rectangle {
+                            x: 0;
+                            width: parent.width * max(0, min(1, root.prepare-progress));
+                            background: Theme.text;
+                        }
                     }
                 }
             }

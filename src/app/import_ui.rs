@@ -10,11 +10,11 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::mpsc;
 
-use logos_rs::personal::{self, Document, Report, Request, store};
+use crate::personal::{self, Document, Report, Request, store};
 use rusqlite::{Connection, OpenFlags};
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
-use crate::{MAX_COLUMNS, MainWindow, State, TranslationItem, refresh_books, refresh_reading};
+use super::{MAX_COLUMNS, MainWindow, State, TranslationItem, refresh_books, refresh_reading};
 
 pub enum Msg {
     Read(Result<(PathBuf, Document), String>),
@@ -68,6 +68,8 @@ fn working(ui: &MainWindow, text: &str, progress: f32) {
 }
 
 pub fn connect(ui: &MainWindow, state: &Rc<RefCell<State>>) {
+    // No file dialog on Android: the card is not offered there.
+    #[cfg(not(target_os = "android"))]
     {
         let (w, state) = (ui.as_weak(), state.clone());
         ui.on_import_choose(move || {
@@ -179,6 +181,7 @@ pub fn relink_stale(state: &Rc<RefCell<State>>) {
 }
 
 /// Read `path` on a worker; the card shows what was found when it is done.
+#[cfg_attr(target_os = "android", allow(dead_code))]
 pub fn start_read(ui: &MainWindow, state: &Rc<RefCell<State>>, path: PathBuf) {
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     working(ui, &format!("Reading {name}…"), -1.0);

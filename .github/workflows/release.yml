@@ -2,7 +2,8 @@
 #   - a .deb for Ubuntu 26.04 "Resolute Raccoon" (built inside an ubuntu:26.04
 #     container, so it links against that release's libraries)
 #   - a Windows installer (Inno Setup) and a portable .zip
-# Both ship the prebuilt Bible database, so the app works offline from the
+#   - an Android APK (64-bit ARM), for e-ink tablets
+# All ship the prebuilt Bible database, so the app works offline from the
 # first launch. Pushing a tag `vX.Y.Z`, or a manual run given a version,
 # publishes them as a GitHub release (a manual run creates the tag on the
 # commit it built); a manual run without a version only uploads them as
@@ -128,9 +129,57 @@ jobs:
             dist/*.exe
           if-no-files-found: error
 
+  android:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-apk
+        run: cargo install cargo-apk --locked
+      - name: Build the Bible database
+        run: cargo run --release --locked --bin import
+      - name: Put it in the APK's assets
+        run: tools/android-db.sh
+      # The keystore in the secrets, so each release can update the last
+      # in place; without one, a throwaway key (an update then needs the old
+      # app uninstalled first).
+      - name: Signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          keystore="$RUNNER_TEMP/leverbe.keystore"
+          if [[ -n "$KEYSTORE_B64" ]]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$keystore"
+            password="$KEYSTORE_PASSWORD"
+          else
+            echo "::warning::No ANDROID_KEYSTORE secret: signing with a throwaway key"
+            password="$(openssl rand -hex 16)"
+            keytool -genkeypair -keystore "$keystore" -storepass "$password" -keypass "$password" \
+              -alias leverbe -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=LeVerbe"
+          fi
+          echo "::add-mask::$password"
+          echo "CARGO_APK_RELEASE_KEYSTORE=$keystore" >> "$GITHUB_ENV"
+          echo "CARGO_APK_RELEASE_KEYSTORE_PASSWORD=$password" >> "$GITHUB_ENV"
+      - name: Build the APK
+        run: |
+          export ANDROID_NDK_ROOT="$ANDROID_NDK_LATEST_HOME"
+          cargo apk build -p leverbe-android --release
+          mkdir -p dist
+          cp target/release/apk/LeVerbe.apk "dist/LeVerbe-${{ needs.version.outputs.version }}-android-arm64.apk"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: leverbe-android
+          path: dist/*.apk
+          if-no-files-found: error
+
   release:
     if: needs.version.outputs.tag != ''
-    needs: [version, deb, windows]
+    needs: [version, deb, windows, android]
     runs-on: ubuntu-latest
     permissions:
       contents: write

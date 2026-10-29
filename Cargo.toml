@@ -8,7 +8,6 @@ directories = "6.0.0"
 flate2 = "1.1.9"
 pdf-extract = "0.12"
 regex = "1.12.4"
-rfd = "0.17"
 roxmltree = "0.21.1"
 rust-stemmers = "1.2"
 rusqlite = { version = "0.37", features = ["bundled"] }
@@ -20,12 +19,21 @@ unicode-normalization = "0.1.25"
 ureq = "3.3.0"
 zip = { version = "9", default-features = false, features = ["deflate"] }
 
+# The import card's file dialog. Android has none: the tablet build does not
+# offer importing.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+rfd = "0.17"
+
 [build-dependencies]
 slint-build = "1.18"
 
 # the icon of LeVerbe.exe
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
+
+# The Android app (android/) is a thin shell around the library.
+[workspace]
+members = ["android"]
 
 [lib]
 name = "logos_rs"

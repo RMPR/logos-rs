@@ -17,3 +17,6 @@
 # Publishers' EPUBs of the optional texts: licensed, never committed
 /data/*.epub
 /data/*.pdf
+
+# The Android build's copy of the database (tools/android-db.sh)
+/android/assets/
